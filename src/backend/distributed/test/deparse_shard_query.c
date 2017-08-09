@@ -19,7 +19,6 @@
 #include "catalog/pg_type.h"
 #include "distributed/master_protocol.h"
 #include "distributed/citus_ruleutils.h"
-#include "distributed/insert_select_planner.h"
 #include "distributed/multi_router_planner.h"
 #include "distributed/test_helper_functions.h" /* IWYU pragma: keep */
 #include "lib/stringinfo.h"
@@ -51,14 +50,9 @@ deparse_shard_query_test(PG_FUNCTION_ARGS)
 	{
 		Node *parsetree = (Node *) lfirst(parseTreeCell);
 		ListCell *queryTreeCell = NULL;
-		List *queryTreeList = NIL;
 
-#if (PG_VERSION_NUM >= 100000)
-		queryTreeList = pg_analyze_and_rewrite((RawStmt *) parsetree, queryStringChar,
-											   NULL, 0, NULL);
-#else
-		queryTreeList = pg_analyze_and_rewrite(parsetree, queryStringChar, NULL, 0);
-#endif
+		List *queryTreeList = pg_analyze_and_rewrite(parsetree, queryStringChar,
+													 NULL, 0);
 
 		foreach(queryTreeCell, queryTreeList)
 		{
@@ -66,7 +60,7 @@ deparse_shard_query_test(PG_FUNCTION_ARGS)
 			StringInfo buffer = makeStringInfo();
 
 			/* reoreder the target list only for INSERT .. SELECT queries */
-			if (InsertSelectIntoDistributedTable(query))
+			if (InsertSelectQuery(query))
 			{
 				RangeTblEntry *insertRte = linitial(query->rtable);
 				RangeTblEntry *subqueryRte = lsecond(query->rtable);

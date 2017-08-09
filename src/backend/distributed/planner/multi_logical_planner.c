@@ -22,12 +22,10 @@
 #include "distributed/citus_clauses.h"
 #include "distributed/colocation_utils.h"
 #include "distributed/metadata_cache.h"
-#include "distributed/insert_select_planner.h"
 #include "distributed/multi_logical_optimizer.h"
 #include "distributed/multi_logical_planner.h"
 #include "distributed/multi_physical_planner.h"
 #include "distributed/relation_restriction_equivalence.h"
-#include "distributed/multi_router_planner.h"
 #include "distributed/worker_protocol.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
@@ -2664,15 +2662,6 @@ NeedsDistributedPlanning(Query *queryTree)
 		return false;
 	}
 
-	/*
-	 * We can handle INSERT INTO distributed_table SELECT ... even if the SELECT
-	 * part references local tables, so skip the remaining checks.
-	 */
-	if (InsertSelectIntoDistributedTable(queryTree))
-	{
-		return true;
-	}
-
 	/* extract range table entries for simple relations only */
 	ExtractRangeTableRelationWalker((Node *) queryTree, &rangeTableList);
 
@@ -2693,10 +2682,11 @@ NeedsDistributedPlanning(Query *queryTree)
 		}
 	}
 
+	/* users can't mix local and distributed relations in one query */
 	if (hasLocalRelation && hasDistributedRelation)
 	{
-		ereport(ERROR, (errmsg("cannot plan queries which include both local and "
-							   "distributed relations")));
+		ereport(ERROR, (errmsg("cannot plan queries that include both regular and "
+							   "partitioned relations")));
 	}
 
 	return hasDistributedRelation;
@@ -2770,11 +2760,17 @@ ExtractRangeTableEntryWalker(Node *node, List **rangeTableList)
 List *
 pull_var_clause_default(Node *node)
 {
+#if (PG_VERSION_NUM >= 90600)
+
 	/*
-	 * PVC_REJECT_PLACEHOLDERS is implicit if PVC_INCLUDE_PLACEHOLDERS
+	 * PVC_REJECT_PLACEHOLDERS is now implicit if PVC_INCLUDE_PLACEHOLDERS
 	 * isn't specified.
 	 */
 	List *columnList = pull_var_clause(node, PVC_RECURSE_AGGREGATES);
+#else
+	List *columnList = pull_var_clause(node, PVC_RECURSE_AGGREGATES,
+									   PVC_REJECT_PLACEHOLDERS);
+#endif
 
 	return columnList;
 }

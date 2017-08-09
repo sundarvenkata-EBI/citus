@@ -28,9 +28,7 @@ SELECT
 FROM
 	pg_dist_shard_placement
 WHERE
-	shardid IN (SELECT shardid FROM pg_dist_shard WHERE logicalrelid = 'reference_table_test'::regclass)
-ORDER BY
-	placementid;
+	shardid IN (SELECT shardid FROM pg_dist_shard WHERE logicalrelid = 'reference_table_test'::regclass);
 
 -- check whether data was copied into distributed table
 SELECT * FROM reference_table_test;
@@ -230,26 +228,17 @@ WHERE
 	value_1 = 1 OR value_1 = 2;
 
 -- set operations are supported
-SELECT * FROM (
-	SELECT * FROM reference_table_test WHERE value_1 = 1
-	UNION
-	SELECT * FROM reference_table_test WHERE value_1 = 3
-) AS combination
-ORDER BY value_1;
+(SELECT * FROM reference_table_test WHERE value_1 = 1)
+UNION
+(SELECT * FROM reference_table_test WHERE value_1 = 3);
 
-SELECT * FROM (
-	SELECT * FROM reference_table_test WHERE value_1 = 1
-	EXCEPT
-	SELECT * FROM reference_table_test WHERE value_1 = 3
-) AS combination
-ORDER BY value_1;
+(SELECT * FROM reference_table_test WHERE value_1 = 1)
+EXCEPT
+(SELECT * FROM reference_table_test WHERE value_1 = 3);
 
-SELECT * FROM (
-	SELECT * FROM reference_table_test WHERE value_1 = 1
-	INTERSECT
-	SELECT * FROM reference_table_test WHERE value_1 = 3
-) AS combination
-ORDER BY value_1;
+(SELECT * FROM reference_table_test WHERE value_1 = 1)
+INTERSECT
+(SELECT * FROM reference_table_test WHERE value_1 = 3);
 
 -- to make the tests more interested for aggregation tests, ingest some more data
 INSERT INTO reference_table_test VALUES (1, 1.0, '1', '2016-12-01');
@@ -503,9 +492,7 @@ SELECT
 FROM
 	pg_dist_shard_placement
 WHERE
-	shardid IN (SELECT shardid FROM pg_dist_shard WHERE logicalrelid = 'reference_table_test_fourth'::regclass)
-ORDER BY
-	placementid;
+	shardid IN (SELECT shardid FROM pg_dist_shard WHERE logicalrelid = 'reference_table_test_fourth'::regclass);
 
 -- let's not run some update/delete queries on arbitrary columns
 DELETE FROM
@@ -679,6 +666,7 @@ WHERE
 	colocated_table_test.value_1 = reference_table_test.value_1 AND colocated_table_test_2.value_1 = reference_table_test.value_1;
 
 
+SET client_min_messages TO NOTICE;
 SET citus.log_multi_join_order TO FALSE;
 
 SET citus.shard_count TO DEFAULT;
@@ -686,7 +674,7 @@ SET citus.task_executor_type to "real-time";
 
 -- some INSERT .. SELECT queries that involve both hash distributed and reference tables
 
--- should go via coordinator since we're inserting into reference table where 
+-- should error out since we're inserting into reference table where 
 -- not all the participants are reference tables
 INSERT INTO
 	reference_table_test (value_1)
@@ -695,9 +683,9 @@ SELECT
 FROM
 	colocated_table_test, colocated_table_test_2
 WHERE
-	colocated_table_test.value_1 = colocated_table_test_2.value_1;
+	colocated_table_test.value_1 = colocated_table_test.value_1;
 
--- should go via coordinator, same as the above
+-- should error out, same as the above
 INSERT INTO
 	reference_table_test (value_1)
 SELECT
@@ -730,7 +718,8 @@ WHERE
 	colocated_table_test_2.value_2 = reference_table_test.value_2
 RETURNING value_1, value_2;
 
--- partition column value comes from reference table, goes via coordinator
+-- partition column value comes from reference table but still first error is
+-- on data type mismatch
 INSERT INTO
 	colocated_table_test (value_1, value_2)
 SELECT
@@ -738,8 +727,10 @@ SELECT
 FROM
 	colocated_table_test_2, reference_table_test
 WHERE
-	colocated_table_test_2.value_4 = reference_table_test.value_4;
+	colocated_table_test_2.value_4 = reference_table_test.value_4
+RETURNING value_1, value_2;
 
+-- partition column value comes from reference table which should error out
 INSERT INTO
 	colocated_table_test (value_1, value_2)
 SELECT
@@ -747,9 +738,9 @@ SELECT
 FROM
 	colocated_table_test_2, reference_table_test
 WHERE
-	colocated_table_test_2.value_4 = reference_table_test.value_4;
+	colocated_table_test_2.value_4 = reference_table_test.value_4
+RETURNING value_1, value_2;
 
-RESET client_min_messages;
 
 -- some tests for mark_tables_colocated
 -- should error out
@@ -859,18 +850,15 @@ ALTER TABLE reference_table_ddl ALTER COLUMN value_2 SET DEFAULT 25.0;
 ALTER TABLE reference_table_ddl ALTER COLUMN value_3 SET NOT NULL;
 
 -- see that Citus applied all DDLs to the table
-SELECT "Column", "Type", "Modifiers" FROM table_desc WHERE relid='public.reference_table_ddl'::regclass;
-\d reference_index_2
+\d reference_table_ddl
 
 -- also to the shard placements
 \c - - - :worker_1_port
-SELECT "Column", "Type", "Modifiers" FROM table_desc WHERE relid='public.reference_table_ddl_1250019'::regclass;
-\d reference_index_2_1250019
+\d reference_table_ddl*
 \c - - - :master_port
 DROP INDEX reference_index_2;
 \c - - - :worker_1_port
-SELECT "Column", "Type", "Modifiers" FROM table_desc WHERE relid='public.reference_table_ddl_1250019'::regclass;
-\di reference_index_2*
+\d reference_table_ddl*
 \c - - - :master_port
 
 -- as we expect, renaming and setting WITH OIDS does not work for reference tables
@@ -994,13 +982,13 @@ UPDATE reference_table_test SET value_1 = 10 WHERE value_1 = 2;
 COMMIT;
 SELECT * FROM reference_table_test;
 
--- DML+master_modify_multiple_shards is allowed
+-- do not allow mixing transactions
 BEGIN;
 INSERT INTO reference_table_test VALUES (2, 2.0, '2', '2016-12-02');
 SELECT master_modify_multiple_shards('DELETE FROM colocated_table_test');
 ROLLBACK;
 
--- DDL+DML is allowed
+-- Do not allow DDL and modification in the same transaction
 BEGIN;
 ALTER TABLE reference_table_test ADD COLUMN value_dummy INT;
 INSERT INTO reference_table_test VALUES (2, 2.0, '2', '2016-12-02');

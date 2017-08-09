@@ -211,21 +211,28 @@ MultiPhysicalPlanCreate(MultiTreeRoot *multiTree,
 	Query *masterQuery = NULL;
 	List *masterDependedJobList = NIL;
 
+	ereport(WARNING, (errmsg("Came to line 214 in multi_physical_planner.c")));
 	/* build the worker job tree and check that we only one job in the tree */
 	workerJob = BuildJobTree(multiTree);
 
+	ereport(WARNING, (errmsg("Came to line 218 in multi_physical_planner.c")));
 	/* create the tree of executable tasks for the worker job */
 	workerJob = BuildJobTreeTaskList(workerJob, plannerRestrictionContext);
 
+	ereport(WARNING, (errmsg("Came to line 222 in multi_physical_planner.c")));
 	/* build the final merge query to execute on the master */
 	masterDependedJobList = list_make1(workerJob);
 	masterQuery = BuildJobQuery((MultiNode *) multiTree, masterDependedJobList);
 
+	ereport(WARNING, (errmsg("Came to line 222 in multi_physical_planner.c")));
+	
 	multiPlan = CitusMakeNode(MultiPlan);
 	multiPlan->workerJob = workerJob;
 	multiPlan->masterQuery = masterQuery;
+	ereport(WARNING, (errmsg("Came to line 232 in multi_physical_planner.c")));
 	multiPlan->routerExecutable = MultiPlanRouterExecutable(multiPlan);
 	multiPlan->operation = CMD_SELECT;
+	ereport(WARNING, (errmsg("Came to line 235 in multi_physical_planner.c")));
 
 	return multiPlan;
 }
@@ -1863,10 +1870,10 @@ BuildMapMergeJob(Query *jobQuery, List *dependedJobList, Var *partitionKey,
 static uint32
 HashPartitionCount(void)
 {
-	uint32 groupCount = ActivePrimaryNodeCount();
+	uint32 nodeCount = WorkerGetLiveNodeCount();
 	double maxReduceTasksPerNode = MaxRunningTasksPerNode / 2.0;
 
-	uint32 partitionCount = (uint32) rint(groupCount * maxReduceTasksPerNode);
+	uint32 partitionCount = (uint32) rint(nodeCount * maxReduceTasksPerNode);
 	return partitionCount;
 }
 
@@ -1929,7 +1936,8 @@ BuildJobTreeTaskList(Job *jobTree, PlannerRestrictionContext *plannerRestriction
 	List *flattenedJobList = NIL;
 	uint32 flattenedJobCount = 0;
 	int32 jobIndex = 0;
-
+	
+	ereport(WARNING, (errmsg("Came to line 1940 in multi_physical_planner.c")));
 	/*
 	 * We traverse the job tree in preorder, and append each visited job to our
 	 * flattened list. This way, each job in our list appears before the jobs it
@@ -1969,15 +1977,18 @@ BuildJobTreeTaskList(Job *jobTree, PlannerRestrictionContext *plannerRestriction
 			sqlTaskList = SqlTaskList(job);
 		}
 
+		ereport(WARNING, (errmsg("Came to line 1980 in multi_physical_planner.c")));
 		sqlTaskList = PruneSqlTaskDependencies(sqlTaskList);
-
+		ereport(WARNING, (errmsg("Came to line 1982 in multi_physical_planner.c")));
 		/*
 		 * We first assign sql and merge tasks to worker nodes. Next, we assign
 		 * sql tasks' data fetch dependencies.
 		 */
+		ereport(WARNING, (errmsg("Came to line 1987 in multi_physical_planner.c")));
 		assignedSqlTaskList = AssignTaskList(sqlTaskList);
+		ereport(WARNING, (errmsg("Came to line 1989 in multi_physical_planner.c")));
 		AssignDataFetchDependencies(assignedSqlTaskList);
-
+		ereport(WARNING, (errmsg("Came to line 1991 in multi_physical_planner.c")));
 		/* now assign merge task's data fetch dependencies */
 		foreach(assignedSqlTaskCell, assignedSqlTaskList)
 		{
@@ -2291,12 +2302,12 @@ SubqueryTaskCreate(Query *originalQuery, ShardInterval *shardInterval,
 	uint64 selectAnchorShardId = INVALID_SHARD_ID;
 	List *relationShardList = NIL;
 	uint64 jobId = INVALID_JOB_ID;
+	bool routerPlannable = false;
 	bool replacePrunedQueryWithDummy = false;
 	RelationRestrictionContext *copiedRestrictionContext =
 		CopyRelationRestrictionContext(restrictionContext);
 	List *shardOpExpressions = NIL;
 	RestrictInfo *shardRestrictionList = NULL;
-	DeferredErrorMessage *planningError = NULL;
 
 	/* such queries should go through router planner */
 	Assert(!restrictionContext->allReferenceTables);
@@ -2330,12 +2341,12 @@ SubqueryTaskCreate(Query *originalQuery, ShardInterval *shardInterval,
 	 * or not. If we can, we also rely on the side-effects that all RTEs have been
 	 * updated to point to the relevant nodes and selectPlacementList is determined.
 	 */
-	planningError = PlanRouterQuery(taskQuery, copiedRestrictionContext,
-									&selectPlacementList, &selectAnchorShardId,
-									&relationShardList, replacePrunedQueryWithDummy);
+	routerPlannable = RouterSelectQuery(taskQuery, copiedRestrictionContext,
+										&selectPlacementList, &selectAnchorShardId,
+										&relationShardList, replacePrunedQueryWithDummy);
 
 	/* we don't expect to this this error but keeping it as a precaution for future changes */
-	if (planningError)
+	if (!routerPlannable)
 	{
 		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 						errmsg("cannot perform distributed planning for the given "
@@ -4473,7 +4484,9 @@ AssignTaskList(List *sqlTaskList)
 		return NIL;
 	}
 
+	ereport(WARNING, (errmsg("Came to line 4487 in multi_physical_planner.c")));
 	firstSqlTask = (Task *) linitial(sqlTaskList);
+	ereport(WARNING, (errmsg("Came to line 4489 in multi_physical_planner.c")));
 	if (firstSqlTask->anchorShardId != INVALID_SHARD_ID)
 	{
 		hasAnchorShardId = true;
@@ -4488,12 +4501,14 @@ AssignTaskList(List *sqlTaskList)
 	if (!hasMergeTaskDependencies)
 	{
 		Assert(hasAnchorShardId);
+		ereport(WARNING, (errmsg("Came to line 4504 in multi_physical_planner.c")));
 
 		assignedSqlTaskList = AssignAnchorShardTaskList(sqlTaskList);
 
+		ereport(WARNING, (errmsg("Came to line 4508 in multi_physical_planner.c")));
 		return assignedSqlTaskList;
 	}
-
+	
 	/*
 	 * SQL tasks can depend on merge tasks in one of two ways: (1) each SQL task
 	 * depends on merge task(s) that no other SQL task depends upon, (2) several
@@ -4501,6 +4516,7 @@ AssignTaskList(List *sqlTaskList)
 	 * the same worker node. To handle the second case, we first pick a primary
 	 * SQL task among those that depend on the same merge task, and assign it.
 	 */
+	ereport(WARNING, (errmsg("Came to line 4519 in multi_physical_planner.c")));
 	foreach(sqlTaskCell, sqlTaskList)
 	{
 		Task *sqlTask = (Task *) lfirst(sqlTaskCell);
@@ -4514,7 +4530,7 @@ AssignTaskList(List *sqlTaskList)
 			primarySqlTaskList = lappend(primarySqlTaskList, sqlTask);
 		}
 	}
-
+	ereport(WARNING, (errmsg("Came to line 4533 in multi_physical_planner.c")));
 	if (hasAnchorShardId)
 	{
 		primarySqlTaskList = AssignAnchorShardTaskList(primarySqlTaskList);
@@ -4755,7 +4771,7 @@ List *
 AssignAnchorShardTaskList(List *taskList)
 {
 	List *assignedTaskList = NIL;
-
+	
 	/* choose task assignment policy based on config value */
 	if (TaskAssignmentPolicy == TASK_ASSIGNMENT_GREEDY)
 	{
@@ -4790,8 +4806,9 @@ GreedyAssignTaskList(List *taskList)
 	uint32 assignedTaskCount = 0;
 	uint32 taskCount = list_length(taskList);
 
+	
 	/* get the worker node list and sort the list */
-	List *workerNodeList = ActivePrimaryNodeList();
+	List *workerNodeList = ActiveWorkerNodeList();	
 	workerNodeList = SortList(workerNodeList, CompareWorkerNodes);
 
 	/*
@@ -5100,7 +5117,7 @@ ActiveShardPlacementLists(List *taskList)
 
 /*
  * CompareShardPlacements compares two shard placements by their tuple oid; this
- * oid reflects the tuple's insertion order into pg_dist_placement.
+ * oid reflects the tuple's insertion order into pg_dist_shard_placement.
  */
 int
 CompareShardPlacements(const void *leftElement, const void *rightElement)
@@ -5223,7 +5240,7 @@ AssignDualHashTaskList(List *taskList)
 	 * if subsequent jobs have a small number of tasks, we won't allocate the
 	 * tasks to the same worker repeatedly.
 	 */
-	List *workerNodeList = ActivePrimaryNodeList();
+	List *workerNodeList = ActiveWorkerNodeList();
 	uint32 workerNodeCount = (uint32) list_length(workerNodeList);
 	uint32 beginningNodeIndex = jobId % workerNodeCount;
 

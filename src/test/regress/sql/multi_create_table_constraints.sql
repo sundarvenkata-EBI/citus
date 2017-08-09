@@ -237,8 +237,9 @@ SELECT master_create_distributed_table('check_example', 'partition_col', 'hash')
 SELECT master_create_worker_shards('check_example', '2', '2');
 
 \c - - - :worker_1_port
-\d check_example_partition_col_key_365040
-SELECT "Constraint", "Definition" FROM table_checks WHERE relid='public.check_example_365040'::regclass;
+\d check_example*
+\c - - - :worker_2_port
+\d check_example*
 \c - - - :master_port
 
 -- drop unnecessary tables
@@ -259,7 +260,7 @@ CREATE TABLE raw_table_2 (user_id int REFERENCES raw_table_1(user_id), UNIQUE(us
 SELECT create_distributed_table('raw_table_2', 'user_id');
 
 -- see that the constraint exists
-SELECT "Constraint", "Definition" FROM table_fkeys WHERE relid='raw_table_2'::regclass;
+\d raw_table_2
 
 -- should be prevented by the foreign key
 DROP TABLE raw_table_1;
@@ -268,7 +269,7 @@ DROP TABLE raw_table_1;
 DROP TABLE raw_table_1 CASCADE;
 
 -- see that the constraint also dropped
-SELECT "Constraint", "Definition" FROM table_fkeys WHERE relid='raw_table_2'::regclass;
+\d raw_table_2
 
 -- drop the table as well
 DROP TABLE raw_table_2;

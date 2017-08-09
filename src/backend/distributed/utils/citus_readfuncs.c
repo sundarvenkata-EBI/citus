@@ -16,7 +16,6 @@
 #include "distributed/citus_nodefuncs.h"
 #include "distributed/errormessage.h"
 #include "distributed/multi_planner.h"
-#include "distributed/multi_server_executor.h"
 #include "nodes/parsenodes.h"
 #include "nodes/readfuncs.h"
 
@@ -30,6 +29,7 @@
 
 /* Macros for declaring appropriate local variables */
 /* A few guys need only local_node */
+#if (PG_VERSION_NUM >= 90600)
 static inline Node *
 CitusSetTag(Node *node, int tag)
 {
@@ -42,8 +42,12 @@ CitusSetTag(Node *node, int tag)
 /* *INDENT-OFF* */
 #define READ_LOCALS_NO_FIELDS(nodeTypeName) \
 	nodeTypeName *local_node = (nodeTypeName *) CitusSetTag((Node *) node, T_##nodeTypeName)
+#else
+#define READ_LOCALS_NO_FIELDS(nodeTypeName) \
+	nodeTypeName *local_node = CitusMakeNode(nodeTypeName)
+#endif
 
-/* And a few guys need only the pg_strtok support fields */
+/* And a few guys need only the citus_pg_strtok support fields */
 #define READ_TEMP_LOCALS()	\
 	char	   *token;		\
 	int			length
@@ -55,97 +59,80 @@ CitusSetTag(Node *node, int tag)
 
 /* Read an integer field (anything written as ":fldname %d") */
 #define READ_INT_FIELD(fldname) \
-	token = pg_strtok(&length);		/* skip :fldname */ \
-	token = pg_strtok(&length);		/* get field value */ \
+	token = citus_pg_strtok(&length);		/* skip :fldname */ \
+	token = citus_pg_strtok(&length);		/* get field value */ \
 	local_node->fldname = atoi(token)
-
-/* Read an 64-bit integer field (anything written as ":fldname %d") */
-#define READ_INT64_FIELD(fldname) \
-	token = pg_strtok(&length);		/* skip :fldname */ \
-	token = pg_strtok(&length);		/* get field value */ \
-	local_node->fldname = (int64) strtoll(token, NULL, 10)
 
 /* Read an unsigned integer field (anything written as ":fldname %u") */
 #define READ_UINT_FIELD(fldname) \
-	token = pg_strtok(&length);		/* skip :fldname */ \
-	token = pg_strtok(&length);		/* get field value */ \
+	token = citus_pg_strtok(&length);		/* skip :fldname */ \
+	token = citus_pg_strtok(&length);		/* get field value */ \
 	local_node->fldname = atoui(token)
 
 /* XXX: CITUS Read an uint64 field (anything written as ":fldname %u") */
 #define READ_UINT64_FIELD(fldname) \
-	token = pg_strtok(&length);		/* skip :fldname */ \
-	token = pg_strtok(&length);		/* get field value */ \
+	token = citus_pg_strtok(&length);		/* skip :fldname */ \
+	token = citus_pg_strtok(&length);		/* get field value */ \
 	local_node->fldname = atoull(token)
 
 /* Read an OID field (don't hard-wire assumption that OID is same as uint) */
 #define READ_OID_FIELD(fldname) \
-	token = pg_strtok(&length);		/* skip :fldname */ \
-	token = pg_strtok(&length);		/* get field value */ \
+	token = citus_pg_strtok(&length);		/* skip :fldname */ \
+	token = citus_pg_strtok(&length);		/* get field value */ \
 	local_node->fldname = atooid(token)
 
 /* Read a char field (ie, one ascii character) */
 #define READ_CHAR_FIELD(fldname) \
-	token = pg_strtok(&length);		/* skip :fldname */ \
-	token = pg_strtok(&length);		/* get field value */ \
+	token = citus_pg_strtok(&length);		/* skip :fldname */ \
+	token = citus_pg_strtok(&length);		/* get field value */ \
 	local_node->fldname = token[0]
 
 /* Read an enumerated-type field that was written as an integer code */
 #define READ_ENUM_FIELD(fldname, enumtype) \
-	token = pg_strtok(&length);		/* skip :fldname */ \
-	token = pg_strtok(&length);		/* get field value */ \
+	token = citus_pg_strtok(&length);		/* skip :fldname */ \
+	token = citus_pg_strtok(&length);		/* get field value */ \
 	local_node->fldname = (enumtype) atoi(token)
 
 /* Read a float field */
 #define READ_FLOAT_FIELD(fldname) \
-	token = pg_strtok(&length);		/* skip :fldname */ \
-	token = pg_strtok(&length);		/* get field value */ \
+	token = citus_pg_strtok(&length);		/* skip :fldname */ \
+	token = citus_pg_strtok(&length);		/* get field value */ \
 	local_node->fldname = atof(token)
 
 /* Read a boolean field */
 #define READ_BOOL_FIELD(fldname) \
-	token = pg_strtok(&length);		/* skip :fldname */ \
-	token = pg_strtok(&length);		/* get field value */ \
+	token = citus_pg_strtok(&length);		/* skip :fldname */ \
+	token = citus_pg_strtok(&length);		/* get field value */ \
 	local_node->fldname = strtobool(token)
 
 /* Read a character-string field */
 #define READ_STRING_FIELD(fldname) \
-	token = pg_strtok(&length);		/* skip :fldname */ \
-	token = pg_strtok(&length);		/* get field value */ \
+	token = citus_pg_strtok(&length);		/* skip :fldname */ \
+	token = citus_pg_strtok(&length);		/* get field value */ \
 	local_node->fldname = nullable_string(token, length)
 
 /* Read a parse location field (and throw away the value, per notes above) */
 #define READ_LOCATION_FIELD(fldname) \
-	token = pg_strtok(&length);		/* skip :fldname */ \
-	token = pg_strtok(&length);		/* get field value */ \
+	token = citus_pg_strtok(&length);		/* skip :fldname */ \
+	token = citus_pg_strtok(&length);		/* get field value */ \
 	(void) token;				/* in case not used elsewhere */ \
 	local_node->fldname = -1	/* set field to "unknown" */
 
-/* Read a Node field */
+/* Read a Node field XXX: Citus: replaced call to nodeRead with CitusNodeRead */
 #define READ_NODE_FIELD(fldname) \
-	token = pg_strtok(&length);		/* skip :fldname */ \
+	token = citus_pg_strtok(&length);		/* skip :fldname */ \
 	(void) token;				/* in case not used elsewhere */ \
-	local_node->fldname = nodeRead(NULL, 0)
-
- /* Read an integer field (anything written as ":fldname %d") */
- #define READ_ENUM_ARRAY(fldname, count, enumtype) \
-    token = pg_strtok(&length);		/* skip :fldname */ \
-    token = pg_strtok(&length);      /* skip ( */ \
-    { \
-		int i = 0; \
-		for (i = 0; i < count; i++ ) \
-		{ \
-			token = pg_strtok(&length);		/* get field value */ \
-			local_node->fldname[i] = (enumtype) atoi(token); \
-		} \
-    } \
-	token = pg_strtok(&length);   /* skip ) */ \
-	(void) token
-
-#define READ_INT_ARRAY(fldname, count) READ_ENUM_ARRAY(fldname, count, int32)
+	local_node->fldname = CitusNodeRead(NULL, 0)
 
 /* Routine exit */
+#if (PG_VERSION_NUM >= 90600)
 #define READ_DONE() \
 	return;
+#else
+#define READ_DONE() \
+	return (Node *) local_node
+#endif
+
 
 /*
  * NOTE: use atoi() to read values written with %d, or atoui() to read
@@ -170,8 +157,6 @@ static void
 readJobInfo(Job *local_node)
 {
 	READ_TEMP_LOCALS();
-
-	CitusSetTag((Node *) local_node, T_Job);
 
 	READ_UINT64_FIELD(jobId);
 	READ_NODE_FIELD(jobQuery);
@@ -205,11 +190,6 @@ ReadMultiPlan(READFUNC_ARGS)
 	READ_NODE_FIELD(workerJob);
 	READ_NODE_FIELD(masterQuery);
 	READ_BOOL_FIELD(routerExecutable);
-
-	READ_NODE_FIELD(insertSelectSubquery);
-	READ_NODE_FIELD(insertTargetList);
-	READ_OID_FIELD(targetRelationId);
-
 	READ_NODE_FIELD(planningError);
 
 	READ_DONE();
@@ -229,15 +209,15 @@ ReadShardInterval(READFUNC_ARGS)
 	READ_BOOL_FIELD(minValueExists);
 	READ_BOOL_FIELD(maxValueExists);
 
-	token = pg_strtok(&length); /* skip :minValue */
+	token = citus_pg_strtok(&length); /* skip :minValue */
 	if (!local_node->minValueExists)
-		token = pg_strtok(&length);               /* skip "<>" */
+		token = citus_pg_strtok(&length);               /* skip "<>" */
 	else
 		local_node->minValue = readDatum(local_node->valueByVal);
 
-	token = pg_strtok(&length); /* skip :maxValue */
+	token = citus_pg_strtok(&length); /* skip :maxValue */
 	if (!local_node->minValueExists)
-		token = pg_strtok(&length);               /* skip "<>" */
+		token = citus_pg_strtok(&length);               /* skip "<>" */
 	else
 		local_node->maxValue = readDatum(local_node->valueByVal);
 
@@ -272,7 +252,7 @@ ReadMapMergeJob(READFUNC_ARGS)
 	for (i = 0; i < arrayLength; ++i)
 	{
 		/* can't use READ_NODE_FIELD, no field names */
-		local_node->sortedShardIntervalArray[i] = nodeRead(NULL, 0);
+		local_node->sortedShardIntervalArray[i] = CitusNodeRead(NULL, 0);
 	}
 
 	READ_NODE_FIELD(mapTaskList);
@@ -291,28 +271,12 @@ ReadShardPlacement(READFUNC_ARGS)
 	READ_UINT64_FIELD(shardId);
 	READ_UINT64_FIELD(shardLength);
 	READ_ENUM_FIELD(shardState, RelayFileState);
-	READ_UINT_FIELD(groupId);
 	READ_STRING_FIELD(nodeName);
 	READ_UINT_FIELD(nodePort);
 	/* so we can deal with 0 */
 	READ_INT_FIELD(partitionMethod);
 	READ_UINT_FIELD(colocationGroupId);
 	READ_UINT_FIELD(representativeValue);
-
-	READ_DONE();
-}
-
-
-READFUNC_RET
-ReadGroupShardPlacement(READFUNC_ARGS)
-{
-	READ_LOCALS(GroupShardPlacement);
-
-	READ_UINT64_FIELD(placementId);
-	READ_UINT64_FIELD(shardId);
-	READ_UINT64_FIELD(shardLength);
-	READ_ENUM_FIELD(shardState, RelayFileState);
-	READ_UINT_FIELD(groupId);
 
 	READ_DONE();
 }
@@ -357,13 +321,6 @@ ReadTask(READFUNC_ARGS)
 
 
 READFUNC_RET
-ReadTaskExecution(READFUNC_ARGS)
-{
-	ereport(ERROR, (errmsg("unexpected read request for TaskExecution node")));
-}
-
-
-READFUNC_RET
 ReadDeferredErrorMessage(READFUNC_ARGS)
 {
 	READ_LOCALS(DeferredErrorMessage);
@@ -385,3 +342,86 @@ ReadUnsupportedCitusNode(READFUNC_ARGS)
 {
 	ereport(ERROR, (errmsg("not implemented")));
 }
+
+
+#if (PG_VERSION_NUM < 90600)
+
+/*
+ * readDatum
+ *
+ * Given a string representation of a constant, recreate the appropriate
+ * Datum.  The string representation embeds length info, but not byValue,
+ * so we must be told that.
+ */
+Datum
+readDatum(bool typbyval)
+{
+	Size		length,
+				i;
+	int			tokenLength;
+	char	   *token;
+	Datum		res;
+	char	   *s;
+
+	/*
+	 * read the actual length of the value
+	 */
+	token = citus_pg_strtok(&tokenLength);
+	length = atoui(token);
+
+	token = citus_pg_strtok(&tokenLength);	/* read the '[' */
+	if (token == NULL || token[0] != '[')
+		elog(ERROR, "expected \"[\" to start datum, but got \"%s\"; length = %zu",
+			 token ? (const char *) token : "[NULL]", length);
+
+	if (typbyval)
+	{
+		if (length > (Size) sizeof(Datum))
+			elog(ERROR, "byval datum but length = %zu", length);
+		res = (Datum) 0;
+		s = (char *) (&res);
+		for (i = 0; i < (Size) sizeof(Datum); i++)
+		{
+			token = citus_pg_strtok(&tokenLength);
+			s[i] = (char) atoi(token);
+		}
+	}
+	else if (length <= 0)
+		res = (Datum) NULL;
+	else
+	{
+		s = (char *) palloc(length);
+		for (i = 0; i < length; i++)
+		{
+			token = citus_pg_strtok(&tokenLength);
+			s[i] = (char) atoi(token);
+		}
+		res = PointerGetDatum(s);
+	}
+
+	token = citus_pg_strtok(&tokenLength);	/* read the ']' */
+	if (token == NULL || token[0] != ']')
+		elog(ERROR, "expected \"]\" to end datum, but got \"%s\"; length = %zu",
+			 token ? (const char *) token : "[NULL]", length);
+
+	return res;
+}
+#endif
+
+
+#if (PG_VERSION_NUM >= 90600)
+
+/* *INDENT-ON* */
+
+/*
+ * For 9.6+ we can just use the, now extensible, parseNodeString(). Before
+ * that citus_readfuncs_$ver.c has a version specific implementation.
+ */
+Node *
+CitusParseNodeString(void)
+{
+	return parseNodeString();
+}
+
+
+#endif

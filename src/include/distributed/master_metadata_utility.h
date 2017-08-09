@@ -14,10 +14,8 @@
 #ifndef MASTER_METADATA_UTILITY_H
 #define MASTER_METADATA_UTILITY_H
 
-#include "access/heapam.h"
 #include "access/htup.h"
 #include "access/tupdesc.h"
-#include "catalog/indexing.h"
 #include "distributed/citus_nodes.h"
 #include "distributed/relay_utility.h"
 #include "utils/acl.h"
@@ -30,28 +28,6 @@
 #define PG_TABLE_SIZE_FUNCTION "pg_table_size(%s)"
 #define PG_RELATION_SIZE_FUNCTION "pg_relation_size(%s)"
 #define PG_TOTAL_RELATION_SIZE_FUNCTION "pg_total_relation_size(%s)"
-#define CSTORE_TABLE_SIZE_FUNCTION "cstore_table_size(%s)"
-
-#if (PG_VERSION_NUM < 100000)
-static inline void
-CatalogTupleUpdate(Relation heapRel, ItemPointer otid, HeapTuple tup)
-{
-	simple_heap_update(heapRel, otid, tup);
-	CatalogUpdateIndexes(heapRel, tup);
-}
-
-
-static inline Oid
-CatalogTupleInsert(Relation heapRel, HeapTuple tup)
-{
-	Oid oid = simple_heap_insert(heapRel, tup);
-	CatalogUpdateIndexes(heapRel, tup);
-
-	return oid;
-}
-
-
-#endif
 
 /* In-memory representation of a typed tuple in pg_dist_shard. */
 typedef struct ShardInterval
@@ -70,32 +46,14 @@ typedef struct ShardInterval
 } ShardInterval;
 
 
-/* In-memory representation of a tuple in pg_dist_placement. */
-typedef struct GroupShardPlacement
-{
-	CitusNode type;
-	uint64 placementId;     /* sequence that implies this placement creation order */
-	uint64 shardId;
-	uint64 shardLength;
-	RelayFileState shardState;
-	uint32 groupId;
-} GroupShardPlacement;
-
-
-/* A GroupShardPlacement which has had some extra data resolved */
+/* In-memory representation of a tuple in pg_dist_shard_placement. */
 typedef struct ShardPlacement
 {
-	/*
-	 * careful, the rest of the code assumes this exactly matches GroupShardPlacement
-	 */
 	CitusNode type;
-	uint64 placementId;
+	uint64 placementId;       /* sequence that implies this placement creation order */
 	uint64 shardId;
 	uint64 shardLength;
 	RelayFileState shardState;
-	uint32 groupId;
-
-	/* the rest of the fields aren't from pg_dist_placement */
 	char *nodeName;
 	uint32 nodePort;
 	char partitionMethod;
@@ -116,32 +74,28 @@ extern void CopyShardInterval(ShardInterval *srcInterval, ShardInterval *destInt
 extern void CopyShardPlacement(ShardPlacement *srcPlacement,
 							   ShardPlacement *destPlacement);
 extern uint64 ShardLength(uint64 shardId);
-extern bool NodeGroupHasShardPlacements(uint32 groupId,
-										bool onlyConsiderActivePlacements);
+extern bool NodeHasActiveShardPlacements(char *nodeName, int32 nodePort);
 extern List * FinalizedShardPlacementList(uint64 shardId);
 extern ShardPlacement * FinalizedShardPlacement(uint64 shardId, bool missingOk);
 extern List * BuildShardPlacementList(ShardInterval *shardInterval);
-extern List * GroupShardPlacementsForTableOnGroup(Oid relationId, uint32 groupId);
 
 /* Function declarations to modify shard and shard placement data */
 extern void InsertShardRow(Oid relationId, uint64 shardId, char storageType,
 						   text *shardMinValue, text *shardMaxValue);
 extern void DeleteShardRow(uint64 shardId);
-extern uint64 InsertShardPlacementRow(uint64 shardId, uint64 placementId,
-									  char shardState, uint64 shardLength,
-									  uint32 groupId);
+extern void InsertShardPlacementRow(uint64 shardId, uint64 placementId,
+									char shardState, uint64 shardLength,
+									char *nodeName, uint32 nodePort);
 extern void InsertIntoPgDistPartition(Oid relationId, char distributionMethod,
 									  Var *distributionColumn, uint32 colocationId,
 									  char replicationModel);
 extern void DeletePartitionRow(Oid distributedRelationId);
 extern void DeleteShardRow(uint64 shardId);
 extern void UpdateShardPlacementState(uint64 placementId, char shardState);
-extern void DeleteShardPlacementRow(uint64 placementId);
+extern uint64 DeleteShardPlacementRow(uint64 shardId, char *workerName, uint32
+									  workerPort);
 extern void UpdateColocationGroupReplicationFactor(uint32 colocationId,
 												   int replicationFactor);
-extern void CreateDistributedTable(Oid relationId, Var *distributionColumn,
-								   char distributionMethod, char *colocateWithTableName,
-								   bool viaDeprecatedAPI);
 extern void CreateTruncateTrigger(Oid relationId);
 
 /* Remaining metadata utility functions  */
@@ -150,7 +104,6 @@ extern void EnsureTablePermissions(Oid relationId, AclMode mode);
 extern void EnsureTableOwner(Oid relationId);
 extern void EnsureSuperUser(void);
 extern void EnsureReplicationSettings(Oid relationId, char replicationModel);
-extern bool RegularTable(Oid relationId);
 extern bool TableReferenced(Oid relationId);
 extern char * ConstructQualifiedShardName(ShardInterval *shardInterval);
 extern Datum StringToDatum(char *inputString, Oid dataType);

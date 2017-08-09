@@ -34,9 +34,7 @@
 #include "commands/defrem.h"
 #include "commands/extension.h"
 #include "distributed/citus_ruleutils.h"
-#include "distributed/multi_partitioning_utils.h"
 #include "distributed/relay_utility.h"
-#include "distributed/master_metadata_utility.h"
 #include "foreign/foreign.h"
 #include "lib/stringinfo.h"
 #include "nodes/nodes.h"
@@ -61,7 +59,7 @@
 
 static void AppendOptionListToString(StringInfo stringData, List *options);
 static const char * convert_aclright_to_string(int aclright);
-
+static bool contain_nextval_expression_walker(Node *node, void *context);
 
 /*
  * pg_get_extensiondef_string finds the foreign data wrapper that corresponds to
@@ -195,18 +193,10 @@ pg_get_sequencedef_string(Oid sequenceRelationId)
 
 	/* build our DDL command */
 	qualifiedSequenceName = generate_relation_name(sequenceRelationId, NIL);
-
-#if (PG_VERSION_NUM >= 100000)
-	sequenceDef = psprintf(CREATE_SEQUENCE_COMMAND, qualifiedSequenceName,
-						   pgSequenceForm->seqincrement, pgSequenceForm->seqmin,
-						   pgSequenceForm->seqmax, pgSequenceForm->seqstart,
-						   pgSequenceForm->seqcycle ? "" : "NO ");
-#else
 	sequenceDef = psprintf(CREATE_SEQUENCE_COMMAND, qualifiedSequenceName,
 						   pgSequenceForm->increment_by, pgSequenceForm->min_value,
 						   pgSequenceForm->max_value, pgSequenceForm->start_value,
 						   pgSequenceForm->is_cycled ? "" : "NO ");
-#endif
 
 	return sequenceDef;
 }
@@ -220,20 +210,8 @@ Form_pg_sequence
 pg_get_sequencedef(Oid sequenceRelationId)
 {
 	Form_pg_sequence pgSequenceForm = NULL;
-	HeapTuple heapTuple = NULL;
-
-#if (PG_VERSION_NUM >= 100000)
-	heapTuple = SearchSysCache1(SEQRELID, sequenceRelationId);
-	if (!HeapTupleIsValid(heapTuple))
-	{
-		elog(ERROR, "cache lookup failed for sequence %u", sequenceRelationId);
-	}
-
-	pgSequenceForm = (Form_pg_sequence) GETSTRUCT(heapTuple);
-
-	ReleaseSysCache(heapTuple);
-#else
 	SysScanDesc scanDescriptor = NULL;
+	HeapTuple heapTuple = NULL;
 	Relation sequenceRel = NULL;
 	AclResult permissionCheck = ACLCHECK_NO_PRIV;
 
@@ -263,7 +241,6 @@ pg_get_sequencedef(Oid sequenceRelationId)
 	systable_endscan(scanDescriptor);
 
 	heap_close(sequenceRel, AccessShareLock);
-#endif
 
 	return pgSequenceForm;
 }
@@ -303,20 +280,17 @@ pg_get_tableschemadef_string(Oid tableRelationId, bool includeSequenceDefaults)
 	relation = relation_open(tableRelationId, AccessShareLock);
 	relationName = generate_relation_name(tableRelationId, NIL);
 
-	EnsureRelationKindSupported(tableRelationId);
+	relationKind = relation->rd_rel->relkind;
+	if (relationKind != RELKIND_RELATION && relationKind != RELKIND_FOREIGN_TABLE)
+	{
+		ereport(ERROR, (errcode(ERRCODE_WRONG_OBJECT_TYPE),
+						errmsg("%s is not a regular or foreign table", relationName)));
+	}
 
 	initStringInfo(&buffer);
-
-	if (RegularTable(tableRelationId))
+	if (relationKind == RELKIND_RELATION)
 	{
-		appendStringInfoString(&buffer, "CREATE ");
-
-		if (relation->rd_rel->relpersistence == RELPERSISTENCE_UNLOGGED)
-		{
-			appendStringInfoString(&buffer, "UNLOGGED ");
-		}
-
-		appendStringInfo(&buffer, "TABLE %s (", relationName);
+		appendStringInfo(&buffer, "CREATE TABLE %s (", relationName);
 	}
 	else
 	{
@@ -335,15 +309,7 @@ pg_get_tableschemadef_string(Oid tableRelationId, bool includeSequenceDefaults)
 	{
 		Form_pg_attribute attributeForm = tupleDescriptor->attrs[attributeIndex];
 
-		/*
-		 * We disregard the inherited attributes (i.e., attinhcount > 0) here. The
-		 * reasoning behind this is that Citus implements declarative partitioning
-		 * by creating the partitions first and then sending
-		 * "ALTER TABLE parent_table ATTACH PARTITION .." command. This may not play
-		 * well with regular inhereted tables, which isn't a big concern from Citus'
-		 * perspective.
-		 */
-		if (!attributeForm->attisdropped)
+		if (!attributeForm->attisdropped && attributeForm->attinhcount == 0)
 		{
 			const char *attributeName = NULL;
 			const char *attributeTypeName = NULL;
@@ -456,7 +422,6 @@ pg_get_tableschemadef_string(Oid tableRelationId, bool includeSequenceDefaults)
 	 * If the relation is a foreign table, append the server name and options to
 	 * the create table statement.
 	 */
-	relationKind = relation->rd_rel->relkind;
 	if (relationKind == RELKIND_FOREIGN_TABLE)
 	{
 		ForeignTable *foreignTable = GetForeignTable(tableRelationId);
@@ -466,47 +431,10 @@ pg_get_tableschemadef_string(Oid tableRelationId, bool includeSequenceDefaults)
 		appendStringInfo(&buffer, " SERVER %s", quote_identifier(serverName));
 		AppendOptionListToString(&buffer, foreignTable->options);
 	}
-#if (PG_VERSION_NUM >= 100000)
-	else if (relationKind == RELKIND_PARTITIONED_TABLE)
-	{
-		char *partitioningInformation = GeneratePartitioningInformation(tableRelationId);
-		appendStringInfo(&buffer, " PARTITION BY %s ", partitioningInformation);
-	}
-#endif
+
 	relation_close(relation, AccessShareLock);
 
 	return (buffer.data);
-}
-
-
-/*
- * EnsureRelationKindSupported errors out if the given relation is not supported
- * as a distributed relation.
- */
-void
-EnsureRelationKindSupported(Oid relationId)
-{
-	char relationKind = get_rel_relkind(relationId);
-	bool supportedRelationKind = false;
-
-	supportedRelationKind = RegularTable(relationId) ||
-							relationKind == RELKIND_FOREIGN_TABLE;
-
-	/*
-	 * Citus doesn't support bare inherited tables (i.e., not a partition or
-	 * partitioned table)
-	 */
-	supportedRelationKind = supportedRelationKind && !(IsChildTable(relationId) ||
-													   IsParentTable(relationId));
-
-	if (!supportedRelationKind)
-	{
-		char *relationName = get_rel_name(relationId);
-
-		ereport(ERROR, (errcode(ERRCODE_WRONG_OBJECT_TYPE),
-						errmsg("%s is not a regular, foreign or partitioned table",
-							   relationName)));
-	}
 }
 
 
@@ -520,6 +448,8 @@ char *
 pg_get_tablecolumnoptionsdef_string(Oid tableRelationId)
 {
 	Relation relation = NULL;
+	char *relationName = NULL;
+	char relationKind = 0;
 	TupleDesc tupleDescriptor = NULL;
 	AttrNumber attributeIndex = 0;
 	List *columnOptionList = NIL;
@@ -533,8 +463,14 @@ pg_get_tablecolumnoptionsdef_string(Oid tableRelationId)
 	 * This is primarily to maintain symmetry with pg_get_tableschemadef.
 	 */
 	relation = relation_open(tableRelationId, AccessShareLock);
+	relationName = generate_relation_name(tableRelationId, NIL);
 
-	EnsureRelationKindSupported(tableRelationId);
+	relationKind = relation->rd_rel->relkind;
+	if (relationKind != RELKIND_RELATION && relationKind != RELKIND_FOREIGN_TABLE)
+	{
+		ereport(ERROR, (errcode(ERRCODE_WRONG_OBJECT_TYPE),
+						errmsg("%s is not a regular or foreign table", relationName)));
+	}
 
 	/*
 	 * Iterate over the table's columns. If a particular column is not dropped
@@ -1046,7 +982,7 @@ convert_aclright_to_string(int aclright)
  * contain_nextval_expression_walker walks over expression tree and returns
  * true if it contains call to 'nextval' function.
  */
-bool
+static bool
 contain_nextval_expression_walker(Node *node, void *context)
 {
 	if (node == NULL)

@@ -28,11 +28,11 @@ ORDER BY
     shardid, nodename, nodeport;
 
 -- verify table is not dropped
-\dt transactional_drop_shards
+\d transactional_drop_shards;
 
 -- verify shards are not dropped
 \c - - - :worker_1_port
-\dt transactional_drop_shards_*
+\d transactional_drop_shards_*;
 \c - - - :master_port
 
 
@@ -53,11 +53,11 @@ ORDER BY
     shardid, nodename, nodeport;
 
 -- verify table is dropped
-\dt transactional_drop_shards
+\d transactional_drop_shards;
 
 -- verify shards are dropped
 \c - - - :worker_1_port
-\dt transactional_drop_shards_*
+\d transactional_drop_shards_*;
 \c - - - :master_port
 
 
@@ -83,7 +83,7 @@ ORDER BY
 
 -- verify shards are not dropped
 \c - - - :worker_1_port
-\dt transactional_drop_shards_*
+\d transactional_drop_shards_*;
 \c - - - :master_port
 
 
@@ -105,7 +105,7 @@ ORDER BY
 
 -- verify shards are dropped
 \c - - - :worker_1_port
-\dt transactional_drop_shards_*
+\d transactional_drop_shards_*;
 \c - - - :master_port
 
 
@@ -129,11 +129,11 @@ ORDER BY
     shardid, nodename, nodeport;
 
 -- verify table is not dropped
-\dt transactional_drop_shards
+\d transactional_drop_shards;
 
 -- verify shards are not dropped
 \c - - - :worker_1_port
-\dt transactional_drop_shards_*
+\d transactional_drop_shards_*;
 \c - - - :master_port
 
 
@@ -156,7 +156,7 @@ ORDER BY
 
 -- verify shards are not dropped
 \c - - - :worker_1_port
-\dt transactional_drop_shards_*
+\d transactional_drop_shards_*;
 
 
 -- test DROP table with failing worker
@@ -186,11 +186,11 @@ ORDER BY
     shardid, nodename, nodeport;
 
 -- verify table is not dropped
-\dt transactional_drop_shards
+\d transactional_drop_shards;
 
 -- verify shards are not dropped
 \c - - - :worker_1_port
-\dt transactional_drop_shards_*
+\d transactional_drop_shards_*;
 \c - - - :master_port
 
 
@@ -214,11 +214,11 @@ ORDER BY
     shardid, nodename, nodeport;
 
 -- verify table is not dropped
-\dt transactional_drop_reference
+\d transactional_drop_reference;
 
 -- verify shards are not dropped
 \c - - - :worker_1_port
-\dt transactional_drop_reference*
+\d transactional_drop_reference*;
 \c - - - :master_port
 
 
@@ -240,7 +240,7 @@ ORDER BY
 
 -- verify shards are not dropped
 \c - - - :worker_1_port
-\dt transactional_drop_shards_*
+\d transactional_drop_shards_*;
 DROP EVENT TRIGGER fail_drop_table;
 \c - - - :master_port
 
@@ -267,11 +267,11 @@ ORDER BY
     shardid, nodename, nodeport;
 
 -- verify table is not dropped
-\dt transactional_drop_serial
+\d transactional_drop_serial;
 
 -- verify shards and sequence are not dropped
 \c - - - :worker_1_port
-\dt transactional_drop_serial_*
+\d transactional_drop_serial_1410006;
 \ds transactional_drop_serial_column2_seq
 \c - - - :master_port
 
@@ -293,11 +293,11 @@ ORDER BY
     shardid, nodename, nodeport;
 
 -- verify table is dropped
-\dt transactional_drop_serial
+\d transactional_drop_serial;
 
 -- verify shards and sequence are dropped
 \c - - - :worker_1_port
-\dt transactional_drop_serial_*
+\d transactional_drop_serial_1410006;
 \ds transactional_drop_serial_column2_seq
 \c - - - :master_port
 

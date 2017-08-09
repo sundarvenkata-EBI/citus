@@ -73,18 +73,18 @@ bool AllModificationsCommutative = false;
 bool EnableDeadlockPrevention = true;
 
 /* functions needed during run phase */
-static void AcquireMetadataLocks(List *taskList);
-static ShardPlacementAccess * CreatePlacementAccess(ShardPlacement *placement,
-													ShardPlacementAccessType accessType);
+static void ReacquireMetadataLocks(List *taskList);
+static void AssignInsertTaskShardId(Query *jobQuery, List *taskList);
 static void ExecuteSingleModifyTask(CitusScanState *scanState, Task *task,
 									bool expectResults);
 static void ExecuteSingleSelectTask(CitusScanState *scanState, Task *task);
-static List * GetModifyConnections(Task *task, bool markCritical,
+static List * GetModifyConnections(List *taskPlacementList, bool markCritical,
 								   bool startedInTransaction);
 static void ExecuteMultipleTasks(CitusScanState *scanState, List *taskList,
 								 bool isModificationQuery, bool expectResults);
 static int64 ExecuteModifyTasks(List *taskList, bool expectResults,
 								ParamListInfo paramListInfo, CitusScanState *scanState);
+static List * TaskShardIntervalList(List *taskList);
 static void AcquireExecutorShardLock(Task *task, CmdType commandType);
 static void AcquireExecutorMultiShardLocks(List *taskList);
 static bool RequiresConsistentSnapshot(Task *task);
@@ -100,14 +100,25 @@ static bool ConsumeQueryResult(MultiConnection *connection, bool failOnError,
 
 
 /*
- * AcquireMetadataLocks acquires metadata locks on each of the anchor
- * shards in the task list to prevent a shard being modified while it
- * is being copied.
+ * ReacquireMetadataLocks re-acquires the metadata locks that are normally
+ * acquired during planning.
+ *
+ * If we are executing a prepared statement, then planning might have
+ * happened in a separate transaction and advisory locks are no longer
+ * held. If a shard is currently being repaired/copied/moved, then
+ * obtaining the locks will fail and this function throws an error to
+ * prevent executing a stale plan.
+ *
+ * If we are executing a non-prepared statement or planning happened in
+ * the same transaction, then we already have the locks and obtain them
+ * again here. Since we always release these locks at the end of the
+ * transaction, this is effectively a no-op.
  */
 static void
-AcquireMetadataLocks(List *taskList)
+ReacquireMetadataLocks(List *taskList)
 {
 	ListCell *taskCell = NULL;
+	ereport(WARNING, (errmsg("Came to line 121 in multi_router_executor.c")));
 
 	/*
 	 * Note: to avoid the overhead of additional sorting, we assume tasks
@@ -120,7 +131,28 @@ AcquireMetadataLocks(List *taskList)
 	{
 		Task *task = (Task *) lfirst(taskCell);
 
-		LockShardDistributionMetadata(task->anchorShardId, ShareLock);
+		/*
+		 * Only obtain metadata locks for modifications to allow reads to
+		 * proceed during shard copy.
+		 */
+		if (task->taskType == MODIFY_TASK &&
+			!TryLockShardDistributionMetadata(task->anchorShardId, ShareLock))
+		{
+			/*
+			 * We could error out immediately to give quick feedback to the
+			 * client, but this might complicate flow control and our default
+			 * behaviour during shard copy is to block.
+			 *
+			 * Block until the lock becomes available such that the next command
+			 * will likely succeed and use the serialization failure error code
+			 * to signal to the client that it should retry the current command.
+			 */
+			LockShardDistributionMetadata(task->anchorShardId, ShareLock);
+
+			ereport(ERROR, (errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+							errmsg("prepared modifications cannot be executed on "
+								   "a shard while it is being copied")));
+		}
 	}
 }
 
@@ -395,41 +427,75 @@ CitusModifyBeginScan(CustomScanState *node, EState *estate, int eflags)
 	if (workerJob->requiresMasterEvaluation)
 	{
 		PlanState *planState = &(scanState->customScanState.ss.ps);
-		EState *executorState = planState->state;
 
 		ExecuteMasterEvaluableFunctions(jobQuery, planState);
 
-		/*
-		 * We've processed parameters in ExecuteMasterEvaluableFunctions and
-		 * don't need to send their values to workers, since they will be
-		 * represented as constants in the deparsed query. To avoid sending
-		 * parameter values, we set the parameter list to NULL.
-		 */
-		executorState->es_param_list_info = NULL;
-
 		if (deferredPruning)
 		{
-			DeferredErrorMessage *planningError = NULL;
-
-			/* need to perform shard pruning, rebuild the task list from scratch */
-			taskList = RouterInsertTaskList(jobQuery, &planningError);
-
-			if (planningError != NULL)
-			{
-				RaiseDeferredError(planningError, ERROR);
-			}
-
-			workerJob->taskList = taskList;
+			AssignInsertTaskShardId(jobQuery, taskList);
 		}
 
 		RebuildQueryStrings(jobQuery, taskList);
 	}
 
-	/* prevent concurrent placement changes */
-	AcquireMetadataLocks(taskList);
+	/*
+	 * If we are executing a prepared statement, then we may not yet have obtained
+	 * the metadata locks in this transaction. To prevent a concurrent shard copy,
+	 * we re-obtain them here or error out if a shard copy has already started.
+	 *
+	 * If a shard copy finishes in between fetching a plan from cache and
+	 * re-acquiring the locks, then we might still run a stale plan, which could
+	 * cause shard placements to diverge. To minimize this window, we take the
+	 * locks as early as possible.
+	 */
+	ReacquireMetadataLocks(taskList);
 
-	/* assign task placements */
-	workerJob->taskList = FirstReplicaAssignTaskList(taskList);
+	/*
+	 * If we deferred shard pruning to the executor, then we still need to assign
+	 * shard placements. We do this after acquiring the metadata locks to ensure
+	 * we can't get stale metadata. At some point, we may want to load all
+	 * placement metadata here.
+	 */
+	if (deferredPruning)
+	{
+		/* modify tasks are always assigned using first-replica policy */
+		workerJob->taskList = FirstReplicaAssignTaskList(taskList);
+	}
+}
+
+
+/*
+ * AssignInsertTaskShardId performs shard pruning for an insert and sets
+ * anchorShardId accordingly.
+ */
+static void
+AssignInsertTaskShardId(Query *jobQuery, List *taskList)
+{
+	ShardInterval *shardInterval = NULL;
+	Task *insertTask = NULL;
+	DeferredErrorMessage *planningError = NULL;
+
+	Assert(jobQuery->commandType == CMD_INSERT);
+
+	/*
+	 * We skipped shard pruning in the planner because the partition
+	 * column contained an expression. Perform shard pruning now.
+	 */
+	shardInterval = FindShardForInsert(jobQuery, &planningError);
+	if (planningError != NULL)
+	{
+		RaiseDeferredError(planningError, ERROR);
+	}
+	else if (shardInterval == NULL)
+	{
+		/* expression could not be evaluated */
+		ereport(ERROR, (errmsg("parameters in the partition column are not "
+							   "allowed")));
+	}
+
+	/* assign a shard ID to the task */
+	insertTask = (Task *) linitial(taskList);
+	insertTask->anchorShardId = shardInterval->shardId;
 }
 
 
@@ -449,13 +515,9 @@ RouterSingleModifyExecScan(CustomScanState *node)
 		bool hasReturning = multiPlan->hasReturning;
 		Job *workerJob = multiPlan->workerJob;
 		List *taskList = workerJob->taskList;
+		Task *task = (Task *) linitial(taskList);
 
-		if (list_length(taskList) > 0)
-		{
-			Task *task = (Task *) linitial(taskList);
-
-			ExecuteSingleModifyTask(scanState, task, hasReturning);
-		}
+		ExecuteSingleModifyTask(scanState, task, hasReturning);
 
 		scanState->finishedRemoteScan = true;
 	}
@@ -512,13 +574,9 @@ RouterSelectExecScan(CustomScanState *node)
 		MultiPlan *multiPlan = scanState->multiPlan;
 		Job *workerJob = multiPlan->workerJob;
 		List *taskList = workerJob->taskList;
+		Task *task = (Task *) linitial(taskList);
 
-		if (list_length(taskList) > 0)
-		{
-			Task *task = (Task *) linitial(taskList);
-
-			ExecuteSingleSelectTask(scanState, task);
-		}
+		ExecuteSingleSelectTask(scanState, task);
 
 		scanState->finishedRemoteScan = true;
 	}
@@ -544,7 +602,13 @@ ExecuteSingleSelectTask(CitusScanState *scanState, Task *task)
 	List *taskPlacementList = task->taskPlacementList;
 	ListCell *taskPlacementCell = NULL;
 	char *queryString = task->queryString;
-	List *relationShardList = task->relationShardList;
+
+	if (XactModificationLevel == XACT_MODIFICATION_MULTI_SHARD)
+	{
+		ereport(ERROR, (errcode(ERRCODE_ACTIVE_SQL_TRANSACTION),
+						errmsg("single-shard query may not appear in transaction blocks "
+							   "which contain multi-shard data modifications")));
+	}
 
 	/*
 	 * Try to run the query to completion on one placement. If the query fails
@@ -557,31 +621,8 @@ ExecuteSingleSelectTask(CitusScanState *scanState, Task *task)
 		bool dontFailOnError = false;
 		int64 currentAffectedTupleCount = 0;
 		int connectionFlags = SESSION_LIFESPAN;
-		List *placementAccessList = NIL;
-		MultiConnection *connection = NULL;
-
-		if (list_length(relationShardList) > 0)
-		{
-			placementAccessList = BuildPlacementSelectList(taskPlacement->groupId,
-														   relationShardList);
-		}
-		else
-		{
-			/*
-			 * When the SELECT prunes down to 0 shards, just use the dummy placement.
-			 *
-			 * FIXME: it would be preferable to evaluate the SELECT locally since no
-			 * data from the workers is required.
-			 */
-
-			ShardPlacementAccess *placementAccess =
-				CreatePlacementAccess(taskPlacement, PLACEMENT_ACCESS_SELECT);
-
-			placementAccessList = list_make1(placementAccess);
-		}
-
-		connection = GetPlacementListConnection(connectionFlags, placementAccessList,
-												NULL);
+		MultiConnection *connection =
+			GetPlacementConnection(connectionFlags, taskPlacement, NULL);
 
 		queryOK = SendQueryInSingleRowMode(connection, queryString, paramListInfo);
 		if (!queryOK)
@@ -598,55 +639,6 @@ ExecuteSingleSelectTask(CitusScanState *scanState, Task *task)
 	}
 
 	ereport(ERROR, (errmsg("could not receive query results")));
-}
-
-
-/*
- * BuildPlacementSelectList builds a list of SELECT placement accesses
- * which can be used to call StartPlacementListConnection or
- * GetPlacementListConnection.
- */
-List *
-BuildPlacementSelectList(uint32 groupId, List *relationShardList)
-{
-	ListCell *relationShardCell = NULL;
-	List *placementAccessList = NIL;
-
-	foreach(relationShardCell, relationShardList)
-	{
-		RelationShard *relationShard = (RelationShard *) lfirst(relationShardCell);
-		ShardPlacement *placement = NULL;
-		ShardPlacementAccess *placementAccess = NULL;
-
-		placement = FindShardPlacementOnGroup(groupId, relationShard->shardId);
-		if (placement == NULL)
-		{
-			ereport(ERROR, (errmsg("no active placement of shard %ld found on group %d",
-								   relationShard->shardId, groupId)));
-		}
-
-		placementAccess = CreatePlacementAccess(placement, PLACEMENT_ACCESS_SELECT);
-		placementAccessList = lappend(placementAccessList, placementAccess);
-	}
-
-	return placementAccessList;
-}
-
-
-/*
- * CreatePlacementAccess returns a new ShardPlacementAccess for the given placement
- * and access type.
- */
-static ShardPlacementAccess *
-CreatePlacementAccess(ShardPlacement *placement, ShardPlacementAccessType accessType)
-{
-	ShardPlacementAccess *placementAccess = NULL;
-
-	placementAccess = (ShardPlacementAccess *) palloc0(sizeof(ShardPlacementAccess));
-	placementAccess->placement = placement;
-	placementAccess->accessType = accessType;
-
-	return placementAccess;
 }
 
 
@@ -678,6 +670,14 @@ ExecuteSingleModifyTask(CitusScanState *scanState, Task *task, bool expectResult
 	bool startedInTransaction =
 		InCoordinatedTransaction() && XactModificationLevel == XACT_MODIFICATION_DATA;
 
+	if (XactModificationLevel == XACT_MODIFICATION_MULTI_SHARD)
+	{
+		ereport(ERROR, (errcode(ERRCODE_ACTIVE_SQL_TRANSACTION),
+						errmsg("single-shard DML commands must not appear in "
+							   "transaction blocks which contain multi-shard data "
+							   "modifications")));
+	}
+
 	/*
 	 * Modifications for reference tables are always done using 2PC. First
 	 * ensure that distributed transaction is started. Then force the
@@ -706,7 +706,7 @@ ExecuteSingleModifyTask(CitusScanState *scanState, Task *task, bool expectResult
 	 * establish the connection, mark as critical (when modifying reference
 	 * table) and start a transaction (when in a transaction).
 	 */
-	connectionList = GetModifyConnections(task,
+	connectionList = GetModifyConnections(taskPlacementList,
 										  taskRequiresTwoPhaseCommit,
 										  startedInTransaction);
 
@@ -776,6 +776,12 @@ ExecuteSingleModifyTask(CitusScanState *scanState, Task *task, bool expectResult
 								   taskPlacement->nodeName, taskPlacement->nodePort)));
 			}
 
+#if (PG_VERSION_NUM < 90600)
+
+			/* before 9.6, PostgreSQL used a uint32 for this field, so check */
+			Assert(currentAffectedTupleCount <= 0xFFFFFFFF);
+#endif
+
 			resultsOK = true;
 			gotResults = true;
 		}
@@ -809,12 +815,10 @@ ExecuteSingleModifyTask(CitusScanState *scanState, Task *task, bool expectResult
  * transaction in progress.
  */
 static List *
-GetModifyConnections(Task *task, bool markCritical, bool noNewTransactions)
+GetModifyConnections(List *taskPlacementList, bool markCritical, bool noNewTransactions)
 {
-	List *taskPlacementList = task->taskPlacementList;
 	ListCell *taskPlacementCell = NULL;
 	List *multiConnectionList = NIL;
-	List *relationShardList = task->relationShardList;
 
 	/* first initiate connection establishment for all necessary connections */
 	foreach(taskPlacementCell, taskPlacementList)
@@ -822,21 +826,14 @@ GetModifyConnections(Task *task, bool markCritical, bool noNewTransactions)
 		ShardPlacement *taskPlacement = (ShardPlacement *) lfirst(taskPlacementCell);
 		int connectionFlags = SESSION_LIFESPAN | FOR_DML;
 		MultiConnection *multiConnection = NULL;
-		List *placementAccessList = NIL;
-		ShardPlacementAccess *placementModification = NULL;
 
-		/* create placement accesses for placements that appear in a subselect */
-		placementAccessList = BuildPlacementSelectList(taskPlacement->groupId,
-													   relationShardList);
-
-		/* create placement access for the placement that we're modifying */
-		placementModification = CreatePlacementAccess(taskPlacement,
-													  PLACEMENT_ACCESS_DML);
-		placementAccessList = lappend(placementAccessList, placementModification);
-
-		/* get an appropriate connection for the DML statement */
-		multiConnection = GetPlacementListConnection(connectionFlags, placementAccessList,
-													 NULL);
+		/*
+		 * FIXME: It's not actually correct to use only one shard placement
+		 * here for router queries involving multiple relations. We should
+		 * check that this connection is the only modifying one associated
+		 * with all the involved shards.
+		 */
+		multiConnection = StartPlacementConnection(connectionFlags, taskPlacement, NULL);
 
 		/*
 		 * If already in a transaction, disallow expanding set of remote
@@ -953,6 +950,7 @@ ExecuteModifyTasks(List *taskList, bool expectResults, ParamListInfo paramListIn
 	ListCell *taskCell = NULL;
 	Task *firstTask = NULL;
 	int connectionFlags = 0;
+	List *shardIntervalList = NIL;
 	List *affectedTupleCountList = NIL;
 	HTAB *shardConnectionHash = NULL;
 	bool tasksPending = true;
@@ -962,6 +960,16 @@ ExecuteModifyTasks(List *taskList, bool expectResults, ParamListInfo paramListIn
 	{
 		return 0;
 	}
+
+	if (XactModificationLevel == XACT_MODIFICATION_DATA)
+	{
+		ereport(ERROR, (errcode(ERRCODE_ACTIVE_SQL_TRANSACTION),
+						errmsg("multi-shard data modifications must not appear in "
+							   "transaction blocks which contain single-shard DML "
+							   "commands")));
+	}
+
+	shardIntervalList = TaskShardIntervalList(taskList);
 
 	/* ensure that there are no concurrent modifications on the same shards */
 	AcquireExecutorMultiShardLocks(taskList);
@@ -986,9 +994,10 @@ ExecuteModifyTasks(List *taskList, bool expectResults, ParamListInfo paramListIn
 	}
 
 	/* open connection to all relevant placements, if not already open */
-	shardConnectionHash = OpenTransactionsForAllTasks(taskList, connectionFlags);
+	shardConnectionHash = OpenTransactionsToAllShardPlacements(shardIntervalList,
+															   connectionFlags);
 
-	XactModificationLevel = XACT_MODIFICATION_DATA;
+	XactModificationLevel = XACT_MODIFICATION_MULTI_SHARD;
 
 	/* iterate over placements in rounds, to ensure in-order execution */
 	while (tasksPending)
@@ -1121,6 +1130,29 @@ ExecuteModifyTasks(List *taskList, bool expectResults, ParamListInfo paramListIn
 	CHECK_FOR_INTERRUPTS();
 
 	return totalAffectedTupleCount;
+}
+
+
+/*
+ * TaskShardIntervalList returns a list of shard intervals for a given list of
+ * tasks.
+ */
+static List *
+TaskShardIntervalList(List *taskList)
+{
+	ListCell *taskCell = NULL;
+	List *shardIntervalList = NIL;
+
+	foreach(taskCell, taskList)
+	{
+		Task *task = (Task *) lfirst(taskCell);
+		int64 shardId = task->anchorShardId;
+		ShardInterval *shardInterval = LoadShardInterval(shardId);
+
+		shardIntervalList = lappend(shardIntervalList, shardInterval);
+	}
+
+	return shardIntervalList;
 }
 
 
@@ -1456,6 +1488,11 @@ ConsumeQueryResult(MultiConnection *connection, bool failOnError, int64 *rows)
 				Assert(currentAffectedTupleCount >= 0);
 			}
 
+#if (PG_VERSION_NUM < 90600)
+
+			/* before 9.6, PostgreSQL used a uint32 for this field, so check */
+			Assert(currentAffectedTupleCount <= 0xFFFFFFFF);
+#endif
 			*rows += currentAffectedTupleCount;
 		}
 		else

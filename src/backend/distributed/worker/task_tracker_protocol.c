@@ -80,12 +80,10 @@ task_tracker_assign_task(PG_FUNCTION_ARGS)
 	}
 
 	/* check that we have enough space in our shared hash for this string */
-	if (taskCallStringLength >= MaxTaskStringSize)
+	if (taskCallStringLength >= TASK_CALL_STRING_SIZE)
 	{
 		ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						errmsg("task string length (%d) exceeds maximum assignable "
-							   "size (%d)", taskCallStringLength, MaxTaskStringSize),
-						errhint("Consider increasing citus.max_task_string_size.")));
+						errmsg("task call string exceeds maximum assignable length")));
 	}
 
 	/*
@@ -293,17 +291,11 @@ CreateJobSchema(StringInfo schemaName)
 
 	createSchemaStmt = makeNode(CreateSchemaStmt);
 	createSchemaStmt->schemaname = schemaName->data;
+	createSchemaStmt->authrole = (Node *) &currentUserRole;
 	createSchemaStmt->schemaElts = NIL;
 
 	/* actually create schema with the current user as owner */
-#if (PG_VERSION_NUM >= 100000)
-	createSchemaStmt->authrole = &currentUserRole;
-	CreateSchemaCommand(createSchemaStmt, queryString, -1, -1);
-#else
-	createSchemaStmt->authrole = (Node *) &currentUserRole;
 	CreateSchemaCommand(createSchemaStmt, queryString);
-#endif
-
 	CommandCounterIncrement();
 
 	/* and reset environment */
@@ -335,7 +327,7 @@ CreateTask(uint64 jobId, uint32 taskId, char *taskCallString)
 	/* enter the worker task into shared hash and initialize the task */
 	workerTask = WorkerTasksHashEnter(jobId, taskId);
 	workerTask->assignedAt = assignmentTime;
-	strlcpy(workerTask->taskCallString, taskCallString, MaxTaskStringSize);
+	strlcpy(workerTask->taskCallString, taskCallString, TASK_CALL_STRING_SIZE);
 
 	workerTask->taskStatus = TASK_ASSIGNED;
 	workerTask->connectionId = INVALID_CONNECTION_ID;
@@ -372,13 +364,13 @@ UpdateTask(WorkerTask *workerTask, char *taskCallString)
 	}
 	else if (taskStatus == TASK_PERMANENTLY_FAILED)
 	{
-		strlcpy(workerTask->taskCallString, taskCallString, MaxTaskStringSize);
+		strlcpy(workerTask->taskCallString, taskCallString, TASK_CALL_STRING_SIZE);
 		workerTask->failureCount = 0;
 		workerTask->taskStatus = TASK_ASSIGNED;
 	}
 	else
 	{
-		strlcpy(workerTask->taskCallString, taskCallString, MaxTaskStringSize);
+		strlcpy(workerTask->taskCallString, taskCallString, TASK_CALL_STRING_SIZE);
 		workerTask->failureCount = 0;
 	}
 }

@@ -278,7 +278,7 @@ FindTranslatedVar(List *appendRelList, Oid relationOid, Index relationRteIndex,
 		return NULL;
 	}
 
-	relationPartitionKey = DistPartitionKey(relationOid);
+	relationPartitionKey = PartitionKey(relationOid);
 
 	translaterVars = targetAppendRelInfo->translated_vars;
 	foreach(translatedVarCell, translaterVars)
@@ -429,7 +429,7 @@ EquivalenceListContainsRelationsEquality(List *attributeEquivalenceList,
 			(RelationRestriction *) lfirst(relationRestrictionCell);
 		int rteIdentity = GetRTEIdentity(relationRestriction->rte);
 
-		if (DistPartitionKey(relationRestriction->relationId) &&
+		if (PartitionKey(relationRestriction->relationId) &&
 			!bms_is_member(rteIdentity, commonRteIdentities))
 		{
 			return false;
@@ -1114,7 +1114,7 @@ AddRteRelationToAttributeEquivalenceClass(AttributeEquivalenceClass **
 		return;
 	}
 
-	relationPartitionKey = DistPartitionKey(relationId);
+	relationPartitionKey = PartitionKey(relationId);
 	if (relationPartitionKey->varattno != varToBeAdded->varattno)
 	{
 		return;

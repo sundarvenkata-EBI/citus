@@ -43,10 +43,12 @@ MultiExecutorType
 JobExecutorType(MultiPlan *multiPlan)
 {
 	Job *job = multiPlan->workerJob;
-	List *workerNodeList = NIL;
-	int workerNodeCount = 0;
-	int taskCount = 0;
-	double tasksPerNode = 0.;
+	List *workerTaskList = job->taskList;
+	List *workerNodeList = ActiveWorkerNodeList();
+	int taskCount = list_length(workerTaskList);
+	int workerNodeCount = list_length(workerNodeList);
+	double tasksPerNode = taskCount / ((double) workerNodeCount);
+	int dependedJobCount = list_length(job->dependedJobList);
 	MultiExecutorType executorType = TaskExecutorType;
 	bool routerExecutablePlan = multiPlan->routerExecutable;
 
@@ -55,11 +57,6 @@ JobExecutorType(MultiPlan *multiPlan)
 	{
 		ereport(DEBUG2, (errmsg("Plan is router executable")));
 		return MULTI_EXECUTOR_ROUTER;
-	}
-
-	if (multiPlan->insertSelectSubquery != NULL)
-	{
-		return MULTI_EXECUTOR_COORDINATOR_INSERT_SELECT;
 	}
 
 	/* if it is not a router executable plan, inform user according to the log level */
@@ -71,15 +68,9 @@ JobExecutorType(MultiPlan *multiPlan)
 												 " queries on the workers.")));
 	}
 
-	workerNodeList = ActivePrimaryNodeList();
-	workerNodeCount = list_length(workerNodeList);
-	taskCount = list_length(job->taskList);
-	tasksPerNode = taskCount / ((double) workerNodeCount);
-
 	if (executorType == MULTI_EXECUTOR_REAL_TIME)
 	{
 		double reasonableConnectionCount = 0;
-		int dependedJobCount = 0;
 
 		/* if we need to open too many connections per worker, warn the user */
 		if (tasksPerNode >= MaxConnections)
@@ -107,7 +98,6 @@ JobExecutorType(MultiPlan *multiPlan)
 		}
 
 		/* if we have repartition jobs with real time executor, error out */
-		dependedJobCount = list_length(job->dependedJobList);
 		if (dependedJobCount > 0)
 		{
 			ereport(ERROR, (errmsg("cannot use real time executor with repartition jobs"),
@@ -170,8 +160,7 @@ InitTaskExecution(Task *task, TaskExecStatus initialTaskExecStatus)
 	uint32 nodeCount = list_length(task->taskPlacementList);
 	uint32 nodeIndex = 0;
 
-	TaskExecution *taskExecution = CitusMakeNode(TaskExecution);
-
+	TaskExecution *taskExecution = palloc0(sizeof(TaskExecution));
 	taskExecution->jobId = task->jobId;
 	taskExecution->taskId = task->taskId;
 	taskExecution->nodeCount = nodeCount;
@@ -236,7 +225,7 @@ CleanupTaskExecution(TaskExecution *taskExecution)
 	pfree(taskExecution->taskStatusArray);
 	pfree(taskExecution->connectionIdArray);
 	pfree(taskExecution->fileDescriptorArray);
-	pfree(taskExecution);
+	memset(taskExecution, 0, sizeof(TaskExecution));
 }
 
 

@@ -14,9 +14,6 @@
 #include "postgres.h" /* IWYU pragma: keep */
 #include "c.h"
 
-#if (PG_VERSION_NUM >= 100000)
-#include "catalog/pg_sequence.h"
-#endif
 #include "commands/sequence.h"
 #include "lib/stringinfo.h"
 #include "nodes/parsenodes.h"
@@ -34,13 +31,11 @@ extern char * pg_get_serverdef_string(Oid tableRelationId);
 extern char * pg_get_sequencedef_string(Oid sequenceRelid);
 extern Form_pg_sequence pg_get_sequencedef(Oid sequenceRelationId);
 extern char * pg_get_tableschemadef_string(Oid tableRelationId, bool forShardCreation);
-extern void EnsureRelationKindSupported(Oid relationId);
 extern char * pg_get_tablecolumnoptionsdef_string(Oid tableRelationId);
 extern void deparse_shard_index_statement(IndexStmt *origStmt, Oid distrelid,
 										  int64 shardid, StringInfo buffer);
 extern char * pg_get_indexclusterdef_string(Oid indexRelationId);
 extern List * pg_get_table_grants(Oid relationId);
-extern bool contain_nextval_expression_walker(Node *node, void *context);
 
 /* Function declarations for version dependent PostgreSQL ruleutils functions */
 extern void pg_get_query_def(Query *query, StringInfo buffer);

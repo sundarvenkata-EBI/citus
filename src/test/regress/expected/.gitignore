@@ -3,7 +3,6 @@
 /multi_alter_table_statements.out
 /multi_alter_table_statements_0.out
 /multi_append_table_to_shard.out
-/multi_behavioral_analytics_create_table.out
 /multi_copy.out
 /multi_create_schema.out
 /multi_large_shardid.out
@@ -13,8 +12,9 @@
 /multi_load_data.out
 /multi_load_large_records.out
 /multi_load_more_data.out
+/multi_subquery.out
+/multi_subquery_0.out
 /worker_copy.out
 /multi_complex_count_distinct.out
 /multi_mx_copy_data.out
-/multi_behavioral_analytics_create_table.out
 /multi_insert_select_behavioral_analytics_create_table.out

@@ -1,3 +1,4 @@
+ALTER SEQUENCE pg_catalog.pg_dist_shardid_seq RESTART 840000;
 -- ===================================================================
 -- test router planner functionality for single shard select queries
 -- ===================================================================
@@ -354,8 +355,7 @@ SELECT
 	id, substring(title, 2, 1) AS subtitle, count(*)
 	FROM articles_hash_mx
 	WHERE author_id = 1 or author_id = 3
-	GROUP BY GROUPING SETS ((id),(subtitle))
-	ORDER BY id, subtitle;
+	GROUP BY GROUPING SETS ((id),(subtitle));
 DEBUG:  Creating router plan
 DEBUG:  Plan is router executable
  id | subtitle | count 
@@ -385,8 +385,7 @@ SELECT
 	id, substring(title, 2, 1) AS subtitle, count(*)
 	FROM articles_hash_mx
 	WHERE author_id = 1 or author_id = 2
-	GROUP BY GROUPING SETS ((id),(subtitle))
-	ORDER BY id, subtitle;
+	GROUP BY GROUPING SETS ((id),(subtitle));
 ERROR:  could not run distributed query with GROUPING SETS, CUBE, or ROLLUP
 HINT:  Consider using an equality filter on the distributed table's partition column.
 -- queries which involve functions in FROM clause are supported if it goes to a single worker.
@@ -709,26 +708,43 @@ DEBUG:  Plan is router executable
 
 	
 -- router plannable union queries are supported
-SELECT * FROM (
-	SELECT * FROM articles_hash_mx WHERE author_id = 1
-	UNION
-	SELECT * FROM articles_hash_mx WHERE author_id = 3
-) AS combination
-ORDER BY id;
+(SELECT * FROM articles_hash_mx WHERE author_id = 1)
+UNION
+(SELECT * FROM articles_hash_mx WHERE author_id = 3);
 DEBUG:  Creating router plan
 DEBUG:  Plan is router executable
  id | author_id |    title     | word_count 
 ----+-----------+--------------+------------
-  1 |         1 | arsenous     |       9572
   3 |         3 | asternal     |      10480
- 11 |         1 | alamo        |       1347
- 13 |         3 | aseyev       |       2255
- 21 |         1 | arcading     |       5890
+ 43 |         3 | affixal      |      12723
  23 |         3 | abhorring    |       6799
+ 13 |         3 | aseyev       |       2255
+ 11 |         1 | alamo        |       1347
+ 41 |         1 | aznavour     |      11814
+  1 |         1 | arsenous     |       9572
+ 21 |         1 | arcading     |       5890
  31 |         1 | athwartships |       7271
  33 |         3 | autochrome   |       8180
- 41 |         1 | aznavour     |      11814
+(10 rows)
+
+SELECT * FROM (
+	(SELECT * FROM articles_hash_mx WHERE author_id = 1)
+	UNION
+	(SELECT * FROM articles_hash_mx WHERE author_id = 3)) uu;
+DEBUG:  Creating router plan
+DEBUG:  Plan is router executable
+ id | author_id |    title     | word_count 
+----+-----------+--------------+------------
+  3 |         3 | asternal     |      10480
  43 |         3 | affixal      |      12723
+ 23 |         3 | abhorring    |       6799
+ 13 |         3 | aseyev       |       2255
+ 11 |         1 | alamo        |       1347
+ 41 |         1 | aznavour     |      11814
+  1 |         1 | arsenous     |       9572
+ 21 |         1 | arcading     |       5890
+ 31 |         1 | athwartships |       7271
+ 33 |         3 | autochrome   |       8180
 (10 rows)
 
 (SELECT LEFT(title, 1) FROM articles_hash_mx WHERE author_id = 1)
@@ -751,20 +767,17 @@ DEBUG:  Plan is router executable
  a
 (1 row)
 
-SELECT * FROM (
-	SELECT LEFT(title, 2) FROM articles_hash_mx WHERE author_id = 1
-	EXCEPT
-	SELECT LEFT(title, 2) FROM articles_hash_mx WHERE author_id = 3
-) AS combination
-ORDER BY 1;
+(SELECT LEFT(title, 2) FROM articles_hash_mx WHERE author_id = 1)
+EXCEPT
+(SELECT LEFT(title, 2) FROM articles_hash_mx WHERE author_id = 3);
 DEBUG:  Creating router plan
 DEBUG:  Plan is router executable
  left 
 ------
- al
- ar
  at
  az
+ ar
+ al
 (4 rows)
 
 -- union queries are not supported if not router plannable

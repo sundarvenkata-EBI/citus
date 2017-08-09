@@ -42,7 +42,6 @@
 #include "distributed/metadata_sync.h"
 #include "distributed/multi_copy.h"
 #include "distributed/multi_join_order.h"
-#include "distributed/multi_partitioning_utils.h"
 #include "distributed/multi_planner.h"
 #include "distributed/multi_router_executor.h"
 #include "distributed/multi_router_planner.h"
@@ -109,8 +108,6 @@ static void VerifyTransmitStmt(CopyStmt *copyStatement);
 /* Local functions forward declarations for processing distributed table commands */
 static Node * ProcessCopyStmt(CopyStmt *copyStatement, char *completionTag,
 							  bool *commandMustRunAsOwner);
-static void ProcessCreateTableStmtPartitionOf(CreateStmt *createStatement);
-static void ProcessAlterTableStmtAttachPartition(AlterTableStmt *alterTableStatement);
 static List * PlanIndexStmt(IndexStmt *createIndexStatement,
 							const char *createIndexCommand);
 static List * PlanDropIndexStmt(DropStmt *dropIndexStatement,
@@ -134,7 +131,6 @@ static void ErrorIfUnstableCreateOrAlterExtensionStmt(Node *parsetree);
 static void ErrorIfUnsupportedIndexStmt(IndexStmt *createIndexStatement);
 static void ErrorIfUnsupportedDropIndexStmt(DropStmt *dropIndexStatement);
 static void ErrorIfUnsupportedAlterTableStmt(AlterTableStmt *alterTableStatement);
-static void ErrorIfAlterDropsPartitionColumn(AlterTableStmt *alterTableStatement);
 static void ErrorIfUnsupportedSeqStmt(CreateSeqStmt *createSeqStmt);
 static void ErrorIfDistributedAlterSeqOwnedBy(AlterSeqStmt *alterSeqStmt);
 static void ErrorIfUnsupportedTruncateStmt(TruncateStmt *truncateStatement);
@@ -150,15 +146,13 @@ static void ErrorIfUnsupportedForeignConstraint(Relation relation,
 static char * ExtractNewExtensionVersion(Node *parsetree);
 static void CreateLocalTable(RangeVar *relation, char *nodeName, int32 nodePort);
 static bool IsAlterTableRenameStmt(RenameStmt *renameStmt);
-static bool AlterInvolvesPartitionColumn(AlterTableStmt *alterTableStatement,
-										 AlterTableCmd *command);
 static void ExecuteDistributedDDLJob(DDLJob *ddlJob);
 static void ShowNoticeIfNotUsing2PC(void);
 static List * DDLTaskList(Oid relationId, const char *commandString);
 static List * CreateIndexTaskList(Oid relationId, IndexStmt *indexStmt);
 static List * DropIndexTaskList(Oid relationId, Oid indexId, DropStmt *dropStmt);
-static List * InterShardDDLTaskList(Oid leftRelationId, Oid rightRelationId,
-									const char *commandString);
+static List * ForeignKeyTaskList(Oid leftRelationId, Oid rightRelationId,
+								 const char *commandString);
 static void RangeVarCallbackForDropIndex(const RangeVar *rel, Oid relOid, Oid oldRelOid,
 										 void *arg);
 static void CheckCopyPermissions(CopyStmt *copyStatement);
@@ -167,49 +161,6 @@ static void PostProcessUtility(Node *parsetree);
 
 
 static bool warnedUserAbout2PC = false;
-
-
-/*
- * multi_ProcessUtility9x is the 9.x-compatible wrapper for Citus' main utility
- * hook. It simply adapts the old-style hook to call into the new-style (10+)
- * hook, which is what now houses all actual logic.
- */
-void
-multi_ProcessUtility9x(Node *parsetree,
-					   const char *queryString,
-					   ProcessUtilityContext context,
-					   ParamListInfo params,
-					   DestReceiver *dest,
-					   char *completionTag)
-{
-	PlannedStmt *plannedStmt = makeNode(PlannedStmt);
-	plannedStmt->commandType = CMD_UTILITY;
-	plannedStmt->utilityStmt = parsetree;
-
-	multi_ProcessUtility(plannedStmt, queryString, context, params, NULL, dest,
-						 completionTag);
-}
-
-
-/*
- * CitusProcessUtility is a version-aware wrapper of ProcessUtility to account
- * for argument differences between the 9.x and 10+ PostgreSQL versions.
- */
-void
-CitusProcessUtility(Node *node, const char *queryString, ProcessUtilityContext context,
-					ParamListInfo params, DestReceiver *dest, char *completionTag)
-{
-#if (PG_VERSION_NUM >= 100000)
-	PlannedStmt *plannedStmt = makeNode(PlannedStmt);
-	plannedStmt->commandType = CMD_UTILITY;
-	plannedStmt->utilityStmt = node;
-
-	ProcessUtility(plannedStmt, queryString, context, params, NULL, dest,
-				   completionTag);
-#else
-	ProcessUtility(node, queryString, context, params, dest, completionTag);
-#endif
-}
 
 
 /*
@@ -222,15 +173,13 @@ CitusProcessUtility(Node *node, const char *queryString, ProcessUtilityContext c
  * TRUNCATE and VACUUM are also supported.
  */
 void
-multi_ProcessUtility(PlannedStmt *pstmt,
+multi_ProcessUtility(Node *parsetree,
 					 const char *queryString,
 					 ProcessUtilityContext context,
 					 ParamListInfo params,
-					 struct QueryEnvironment *queryEnv,
 					 DestReceiver *dest,
 					 char *completionTag)
 {
-	Node *parsetree = pstmt->utilityStmt;
 	bool commandMustRunAsOwner = false;
 	Oid savedUserId = InvalidOid;
 	int savedSecurityContext = 0;
@@ -245,13 +194,8 @@ multi_ProcessUtility(PlannedStmt *pstmt,
 		 * that state. Since we never need to intercept transaction statements,
 		 * skip our checks and immediately fall into standard_ProcessUtility.
 		 */
-#if (PG_VERSION_NUM >= 100000)
-		standard_ProcessUtility(pstmt, queryString, context,
-								params, queryEnv, dest, completionTag);
-#else
 		standard_ProcessUtility(parsetree, queryString, context,
 								params, dest, completionTag);
-#endif
 
 		return;
 	}
@@ -269,13 +213,8 @@ multi_ProcessUtility(PlannedStmt *pstmt,
 		 * Ensure that utility commands do not behave any differently until CREATE
 		 * EXTENSION is invoked.
 		 */
-#if (PG_VERSION_NUM >= 100000)
-		standard_ProcessUtility(pstmt, queryString, context,
-								params, queryEnv, dest, completionTag);
-#else
 		standard_ProcessUtility(parsetree, queryString, context,
 								params, dest, completionTag);
-#endif
 
 		return;
 	}
@@ -341,13 +280,8 @@ multi_ProcessUtility(PlannedStmt *pstmt,
 	{
 		if (IsA(parsetree, IndexStmt))
 		{
-			MemoryContext oldContext = MemoryContextSwitchTo(GetMemoryChunkContext(
-																 parsetree));
-
 			/* copy parse tree since we might scribble on it to fix the schema name */
 			parsetree = copyObject(parsetree);
-
-			MemoryContextSwitchTo(oldContext);
 
 			ddlJobs = PlanIndexStmt((IndexStmt *) parsetree, queryString);
 		}
@@ -407,9 +341,8 @@ multi_ProcessUtility(PlannedStmt *pstmt,
 		/*
 		 * citus.enable_ddl_propagation is disabled, which means that PostgreSQL
 		 * should handle the DDL command on a distributed table directly, without
-		 * Citus intervening. The only exception is partition column drop, in
-		 * which case we error out. Advanced Citus users use this to implement their
-		 * own DDL propagation. We also use it to avoid re-propagating DDL commands
+		 * Citus intervening. Advanced Citus users use this to implement their own
+		 * DDL propagation. We also use it to avoid re-propagating DDL commands
 		 * when changing MX tables on workers. Below, we also make sure that DDL
 		 * commands don't run queries that might get intercepted by Citus and error
 		 * out, specifically we skip validation in foreign keys.
@@ -420,8 +353,6 @@ multi_ProcessUtility(PlannedStmt *pstmt,
 			AlterTableStmt *alterTableStmt = (AlterTableStmt *) parsetree;
 			if (alterTableStmt->relkind == OBJECT_TABLE)
 			{
-				ErrorIfAlterDropsPartitionColumn(alterTableStmt);
-
 				/*
 				 * When issuing an ALTER TABLE ... ADD FOREIGN KEY command, the
 				 * the validation step should be skipped on the distributed table.
@@ -461,43 +392,10 @@ multi_ProcessUtility(PlannedStmt *pstmt,
 		SetUserIdAndSecContext(CitusExtensionOwner(), SECURITY_LOCAL_USERID_CHANGE);
 	}
 
-#if (PG_VERSION_NUM >= 100000)
-	pstmt->utilityStmt = parsetree;
-	standard_ProcessUtility(pstmt, queryString, context,
-							params, queryEnv, dest, completionTag);
-#else
 	standard_ProcessUtility(parsetree, queryString, context,
 							params, dest, completionTag);
-#endif
 
-
-	/*
-	 * We only process CREATE TABLE ... PARTITION OF commands in the function below
-	 * to handle the case when user creates a table as a partition of distributed table.
-	 */
-	if (IsA(parsetree, CreateStmt))
-	{
-		CreateStmt *createStatement = (CreateStmt *) parsetree;
-
-		ProcessCreateTableStmtPartitionOf(createStatement);
-	}
-
-	/*
-	 * We only process ALTER TABLE ... ATTACH PARTITION commands in the function below
-	 * and distribute the partition if necessary.
-	 */
-	if (IsA(parsetree, AlterTableStmt))
-	{
-		AlterTableStmt *alterTableStatement = (AlterTableStmt *) parsetree;
-
-		ProcessAlterTableStmtAttachPartition(alterTableStatement);
-	}
-
-	/* don't run post-process code for local commands */
-	if (ddlJobs != NIL)
-	{
-		PostProcessUtility(parsetree);
-	}
+	PostProcessUtility(parsetree);
 
 	if (commandMustRunAsOwner)
 	{
@@ -551,12 +449,6 @@ multi_ProcessUtility(PlannedStmt *pstmt,
 
 		ProcessVacuumStmt(vacuumStmt, queryString);
 	}
-
-	/*
-	 * Ensure value is valid, we can't do some checks during CREATE
-	 * EXTENSION. This is important to register some invalidation callbacks.
-	 */
-	CitusHasBeenLoaded();
 }
 
 
@@ -691,8 +583,6 @@ ProcessCopyStmt(CopyStmt *copyStatement, char *completionTag, bool *commandMustR
 		{
 			bool isFrom = copyStatement->is_from;
 			Relation copiedRelation = NULL;
-			char *schemaName = NULL;
-			MemoryContext relationContext = NULL;
 
 			/* consider using RangeVarGetRelidExtended to check perms before locking */
 			copiedRelation = heap_openrv(copyStatement->relation,
@@ -701,12 +591,8 @@ ProcessCopyStmt(CopyStmt *copyStatement, char *completionTag, bool *commandMustR
 			isDistributedRelation = IsDistributedTable(RelationGetRelid(copiedRelation));
 
 			/* ensure future lookups hit the same relation */
-			schemaName = get_namespace_name(RelationGetNamespace(copiedRelation));
-
-			/* ensure we copy string into proper context */
-			relationContext = GetMemoryChunkContext(copyStatement->relation);
-			schemaName = MemoryContextStrdup(relationContext, schemaName);
-			copyStatement->relation->schemaname = schemaName;
+			copyStatement->relation->schemaname = get_namespace_name(
+				RelationGetNamespace(copiedRelation));
 
 			heap_close(copiedRelation, NoLock);
 		}
@@ -803,135 +689,6 @@ ProcessCopyStmt(CopyStmt *copyStatement, char *completionTag, bool *commandMustR
 
 
 /*
- * ProcessCreateTableStmtPartitionOf takes CreateStmt object as a parameter but
- * it only processes CREATE TABLE ... PARTITION OF statements and it checks if
- * user creates the table as a partition of a distributed table. In that case,
- * it distributes partition as well. Since the table itself is a partition,
- * CreateDistributedTable will attach it to its parent table automatically after
- * distributing it.
- *
- * This function does nothing if PostgreSQL's version is less then 10 and given
- * CreateStmt is not a CREATE TABLE ... PARTITION OF command.
- */
-static void
-ProcessCreateTableStmtPartitionOf(CreateStmt *createStatement)
-{
-#if (PG_VERSION_NUM >= 100000)
-	if (createStatement->inhRelations != NIL && createStatement->partbound != NULL)
-	{
-		RangeVar *parentRelation = linitial(createStatement->inhRelations);
-		bool parentMissingOk = false;
-		Oid parentRelationId = RangeVarGetRelid(parentRelation, NoLock,
-												parentMissingOk);
-
-		/* a partition can only inherit from single parent table */
-		Assert(list_length(createStatement->inhRelations) == 1);
-
-		Assert(parentRelationId != InvalidOid);
-
-		/*
-		 * If a partition is being created and if its parent is a distributed
-		 * table, we will distribute this table as well.
-		 */
-		if (IsDistributedTable(parentRelationId))
-		{
-			bool missingOk = false;
-			Oid relationId = RangeVarGetRelid(createStatement->relation, NoLock,
-											  missingOk);
-			Var *parentDistributionColumn = DistPartitionKey(parentRelationId);
-			char parentDistributionMethod = DISTRIBUTE_BY_HASH;
-			char *parentRelationName = get_rel_name(parentRelationId);
-			bool viaDeprecatedAPI = false;
-
-			CreateDistributedTable(relationId, parentDistributionColumn,
-								   parentDistributionMethod, parentRelationName,
-								   viaDeprecatedAPI);
-		}
-	}
-#endif
-}
-
-
-/*
- * ProcessAlterTableStmtAttachPartition takes AlterTableStmt object as parameter
- * but it only processes into ALTER TABLE ... ATTACH PARTITION commands and
- * distributes the partition if necessary. There are four cases to consider;
- *
- * Parent is not distributed, partition is not distributed: We do not need to
- * do anything in this case.
- *
- * Parent is not distributed, partition is distributed: This can happen if
- * user first distributes a table and tries to attach it to a non-distributed
- * table. Non-distributed tables cannot have distributed partitions, thus we
- * simply error out in this case.
- *
- * Parent is distributed, partition is not distributed: We should distribute
- * the table and attach it to its parent in workers. CreateDistributedTable
- * perform both of these operations. Thus, we will not propagate ALTER TABLE
- * ... ATTACH PARTITION command to workers.
- *
- * Parent is distributed, partition is distributed: Partition is already
- * distributed, we only need to attach it to its parent in workers. Attaching
- * operation will be performed via propagating this ALTER TABLE ... ATTACH
- * PARTITION command to workers.
- *
- * This function does nothing if PostgreSQL's version is less then 10 and given
- * CreateStmt is not a ALTER TABLE ... ATTACH PARTITION OF command.
- */
-static void
-ProcessAlterTableStmtAttachPartition(AlterTableStmt *alterTableStatement)
-{
-#if (PG_VERSION_NUM >= 100000)
-	List *commandList = alterTableStatement->cmds;
-	ListCell *commandCell = NULL;
-
-	foreach(commandCell, commandList)
-	{
-		AlterTableCmd *alterTableCommand = (AlterTableCmd *) lfirst(commandCell);
-
-		if (alterTableCommand->subtype == AT_AttachPartition)
-		{
-			Oid relationId = AlterTableLookupRelation(alterTableStatement, NoLock);
-			PartitionCmd *partitionCommand = (PartitionCmd *) alterTableCommand->def;
-			bool partitionMissingOk = false;
-			Oid partitionRelationId = RangeVarGetRelid(partitionCommand->name, NoLock,
-													   partitionMissingOk);
-
-			/*
-			 * If user first distributes the table then tries to attach it to non
-			 * distributed table, we error out.
-			 */
-			if (!IsDistributedTable(relationId) &&
-				IsDistributedTable(partitionRelationId))
-			{
-				char *parentRelationName = get_rel_name(partitionRelationId);
-
-				ereport(ERROR, (errmsg("non-distributed tables cannot have "
-									   "distributed partitions"),
-								errhint("Distribute the partitioned table \"%s\" "
-										"instead", parentRelationName)));
-			}
-
-			/* if parent of this table is distributed, distribute this table too */
-			if (IsDistributedTable(relationId) &&
-				!IsDistributedTable(partitionRelationId))
-			{
-				Var *distributionColumn = DistPartitionKey(relationId);
-				char distributionMethod = DISTRIBUTE_BY_HASH;
-				char *relationName = get_rel_name(relationId);
-				bool viaDeprecatedAPI = false;
-
-				CreateDistributedTable(partitionRelationId, distributionColumn,
-									   distributionMethod, relationName,
-									   viaDeprecatedAPI);
-			}
-		}
-	}
-#endif
-}
-
-
-/*
  * PlanIndexStmt determines whether a given CREATE INDEX statement involves
  * a distributed table. If so (and if the statement does not use unsupported
  * options), it modifies the input statement to ensure proper execution against
@@ -956,7 +713,6 @@ PlanIndexStmt(IndexStmt *createIndexStatement, const char *createIndexCommand)
 		bool isDistributedRelation = false;
 		char *namespaceName = NULL;
 		LOCKMODE lockmode = ShareLock;
-		MemoryContext relationContext = NULL;
 
 		/*
 		 * We don't support concurrently creating indexes for distributed
@@ -987,10 +743,6 @@ PlanIndexStmt(IndexStmt *createIndexStatement, const char *createIndexCommand)
 		 * search path by the time postgres starts processing this statement.
 		 */
 		namespaceName = get_namespace_name(RelationGetNamespace(relation));
-
-		/* ensure we copy string into proper context */
-		relationContext = GetMemoryChunkContext(createIndexStatement->relation);
-		namespaceName = MemoryContextStrdup(relationContext, namespaceName);
 		createIndexStatement->relation->schemaname = namespaceName;
 
 		heap_close(relation, NoLock);
@@ -1196,42 +948,6 @@ PlanAlterTableStmt(AlterTableStmt *alterTableStatement, const char *alterTableCo
 				constraint->skip_validation = true;
 			}
 		}
-#if (PG_VERSION_NUM >= 100000)
-		else if (alterTableType == AT_AttachPartition)
-		{
-			PartitionCmd *partitionCommand = (PartitionCmd *) command->def;
-
-			/*
-			 * We only support ALTER TABLE ATTACH PARTITION, if it is only subcommand of
-			 * ALTER TABLE. It was already checked in ErrorIfUnsupportedAlterTableStmt.
-			 */
-			Assert(list_length(commandList) <= 1);
-
-			rightRelationId = RangeVarGetRelid(partitionCommand->name, NoLock, false);
-
-			/*
-			 * Do not generate tasks if relation is distributed and the partition
-			 * is not distributed. Because, we'll manually convert the partition into
-			 * distributed table and co-locate with its parent.
-			 */
-			if (!IsDistributedTable(rightRelationId))
-			{
-				return NIL;
-			}
-		}
-		else if (alterTableType == AT_DetachPartition)
-		{
-			PartitionCmd *partitionCommand = (PartitionCmd *) command->def;
-
-			/*
-			 * We only support ALTER TABLE DETACH PARTITION, if it is only subcommand of
-			 * ALTER TABLE. It was already checked in ErrorIfUnsupportedAlterTableStmt.
-			 */
-			Assert(list_length(commandList) <= 1);
-
-			rightRelationId = RangeVarGetRelid(partitionCommand->name, NoLock, false);
-		}
-#endif
 	}
 
 	ddlJob = palloc0(sizeof(DDLJob));
@@ -1242,8 +958,8 @@ PlanAlterTableStmt(AlterTableStmt *alterTableStatement, const char *alterTableCo
 	if (rightRelationId)
 	{
 		/* if foreign key related, use specialized task list function ... */
-		ddlJob->taskList = InterShardDDLTaskList(leftRelationId, rightRelationId,
-												 alterTableCommand);
+		ddlJob->taskList = ForeignKeyTaskList(leftRelationId, rightRelationId,
+											  alterTableCommand);
 	}
 	else
 	{
@@ -1528,13 +1244,8 @@ VacuumTaskList(Oid relationId, VacuumStmt *vacuumStmt)
 	char *schemaName = get_namespace_name(schemaId);
 	char *tableName = get_rel_name(relationId);
 
-	/*
-	 * We obtain ShareUpdateExclusiveLock here to not conflict with INSERT's
-	 * RowExclusiveLock. However if VACUUM FULL is used, we already obtain
-	 * AccessExclusiveLock before reaching to that point and INSERT's will be
-	 * blocked anyway. This is inline with PostgreSQL's own behaviour.
-	 */
-	LockRelationOid(relationId, ShareUpdateExclusiveLock);
+	/* lock relation metadata before getting shard list */
+	LockRelationDistributionMetadata(relationId, ShareLock);
 
 	shardIntervalList = LoadShardIntervalList(relationId);
 
@@ -1585,7 +1296,9 @@ DeparseVacuumStmtPrefix(VacuumStmt *vacuumStmt)
 	int vacuumFlags = vacuumStmt->options;
 	const int unsupportedFlags PG_USED_FOR_ASSERTS_ONLY = ~(
 		VACOPT_ANALYZE |
+#if (PG_VERSION_NUM >= 90600)
 		VACOPT_DISABLE_PAGE_SKIPPING |
+#endif
 		VACOPT_FREEZE |
 		VACOPT_FULL
 		);
@@ -1619,10 +1332,12 @@ DeparseVacuumStmtPrefix(VacuumStmt *vacuumStmt)
 		appendStringInfoString(vacuumPrefix, "ANALYZE,");
 	}
 
+#if (PG_VERSION_NUM >= 90600)
 	if (vacuumFlags & VACOPT_DISABLE_PAGE_SKIPPING)
 	{
 		appendStringInfoString(vacuumPrefix, "DISABLE_PAGE_SKIPPING,");
 	}
+#endif
 
 	if (vacuumFlags & VACOPT_FREEZE)
 	{
@@ -1781,7 +1496,7 @@ ErrorIfUnsupportedIndexStmt(IndexStmt *createIndexStatement)
 		/* caller uses ShareLock for non-concurrent indexes, use the same lock here */
 		LOCKMODE lockMode = ShareLock;
 		Oid relationId = RangeVarGetRelid(relation, lockMode, missingOk);
-		Var *partitionKey = DistPartitionKey(relationId);
+		Var *partitionKey = PartitionKey(relationId);
 		char partitionMethod = PartitionMethod(relationId);
 		List *indexParameterList = NIL;
 		ListCell *indexParameterCell = NULL;
@@ -1915,11 +1630,37 @@ ErrorIfUnsupportedAlterTableStmt(AlterTableStmt *alterTableStatement)
 			case AT_AlterColumnType:
 			case AT_DropNotNull:
 			{
-				if (AlterInvolvesPartitionColumn(alterTableStatement, command))
+				/* error out if the alter table command is on the partition column */
+
+				Var *partitionColumn = NULL;
+				HeapTuple tuple = NULL;
+				char *alterColumnName = command->name;
+
+				LOCKMODE lockmode = AlterTableGetLockLevel(alterTableStatement->cmds);
+				Oid relationId = AlterTableLookupRelation(alterTableStatement, lockmode);
+				if (!OidIsValid(relationId))
 				{
-					ereport(ERROR, (errmsg("cannot execute ALTER TABLE command "
-										   "involving partition column")));
+					continue;
 				}
+
+				partitionColumn = PartitionKey(relationId);
+
+				tuple = SearchSysCacheAttName(relationId, alterColumnName);
+				if (HeapTupleIsValid(tuple))
+				{
+					Form_pg_attribute targetAttr = (Form_pg_attribute) GETSTRUCT(tuple);
+
+					/* reference tables do not have partition column, so allow them */
+					if (partitionColumn != NULL &&
+						targetAttr->attnum == partitionColumn->varattno)
+					{
+						ereport(ERROR, (errmsg("cannot execute ALTER TABLE command "
+											   "involving partition column")));
+					}
+
+					ReleaseSysCache(tuple);
+				}
+
 				break;
 			}
 
@@ -1950,54 +1691,6 @@ ErrorIfUnsupportedAlterTableStmt(AlterTableStmt *alterTableStatement)
 				break;
 			}
 
-#if (PG_VERSION_NUM >= 100000)
-			case AT_AttachPartition:
-			{
-				Oid relationId = AlterTableLookupRelation(alterTableStatement,
-														  NoLock);
-				PartitionCmd *partitionCommand = (PartitionCmd *) command->def;
-				bool missingOK = false;
-				Oid partitionRelationId = RangeVarGetRelid(partitionCommand->name,
-														   NoLock, missingOK);
-
-				/* we only allow partitioning commands if they are only subcommand */
-				if (commandList->length > 1)
-				{
-					ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-									errmsg("cannot execute ATTACH PARTITION command "
-										   "with other subcommands"),
-									errhint("You can issue each subcommand "
-											"separately.")));
-				}
-
-				if (IsDistributedTable(partitionRelationId) &&
-					!TablesColocated(relationId, partitionRelationId))
-				{
-					ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-									errmsg("distributed tables cannot have "
-										   "non-colocated distributed tables as a "
-										   "partition ")));
-				}
-
-				break;
-			}
-
-			case AT_DetachPartition:
-			{
-				/* we only allow partitioning commands if they are only subcommand */
-				if (commandList->length > 1)
-				{
-					ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-									errmsg("cannot execute DETACH PARTITION command "
-										   "with other subcommands"),
-									errhint("You can issue each subcommand "
-											"separately.")));
-				}
-
-				break;
-			}
-
-#endif
 			case AT_SetNotNull:
 			case AT_DropConstraint:
 			case AT_EnableTrigAll:
@@ -2015,60 +1708,9 @@ ErrorIfUnsupportedAlterTableStmt(AlterTableStmt *alterTableStatement)
 			{
 				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 								errmsg("alter table command is currently unsupported"),
-								errdetail("Only ADD|DROP COLUMN, SET|DROP NOT NULL, "
-										  "SET|DROP DEFAULT, ADD|DROP CONSTRAINT, "
-										  "ATTACH|DETACH PARTITION and TYPE subcommands "
-										  "are supported.")));
-			}
-		}
-	}
-}
-
-
-/*
- * ErrorIfDropPartitionColumn checks if any subcommands of the given alter table
- * command is a DROP COLUMN command which drops the partition column of a distributed
- * table. If there is such a subcommand, this function errors out.
- */
-static void
-ErrorIfAlterDropsPartitionColumn(AlterTableStmt *alterTableStatement)
-{
-	LOCKMODE lockmode = 0;
-	Oid leftRelationId = InvalidOid;
-	bool isDistributedRelation = false;
-	List *commandList = alterTableStatement->cmds;
-	ListCell *commandCell = NULL;
-
-	/* first check whether a distributed relation is affected */
-	if (alterTableStatement->relation == NULL)
-	{
-		return;
-	}
-
-	lockmode = AlterTableGetLockLevel(alterTableStatement->cmds);
-	leftRelationId = AlterTableLookupRelation(alterTableStatement, lockmode);
-	if (!OidIsValid(leftRelationId))
-	{
-		return;
-	}
-
-	isDistributedRelation = IsDistributedTable(leftRelationId);
-	if (!isDistributedRelation)
-	{
-		return;
-	}
-
-	/* then check if any of subcommands drop partition column.*/
-	foreach(commandCell, commandList)
-	{
-		AlterTableCmd *command = (AlterTableCmd *) lfirst(commandCell);
-		AlterTableType alterTableType = command->subtype;
-		if (alterTableType == AT_DropColumn)
-		{
-			if (AlterInvolvesPartitionColumn(alterTableStatement, command))
-			{
-				ereport(ERROR, (errmsg("cannot execute ALTER TABLE command "
-									   "dropping partition column")));
+								errdetail("Only ADD|DROP COLUMN, SET|DROP NOT NULL,"
+										  " SET|DROP DEFAULT, ADD|DROP CONSTRAINT and "
+										  "TYPE subcommands are supported.")));
 			}
 		}
 	}
@@ -2085,7 +1727,7 @@ ErrorIfUnsupportedAlterAddConstraintStmt(AlterTableStmt *alterTableStatement)
 	LOCKMODE lockmode = AlterTableGetLockLevel(alterTableStatement->cmds);
 	Oid relationId = AlterTableLookupRelation(alterTableStatement, lockmode);
 	char distributionMethod = PartitionMethod(relationId);
-	Var *distributionColumn = DistPartitionKey(relationId);
+	Var *distributionColumn = PartitionKey(relationId);
 	uint32 colocationId = TableColocationId(relationId);
 	Relation relation = relation_open(relationId, ExclusiveLock);
 
@@ -2358,7 +2000,7 @@ ErrorIfUnsupportedForeignConstraint(Relation relation, char distributionMethod,
 			 * Partition column must exist in both referencing and referenced side of the
 			 * foreign key constraint. They also must be in same ordinal.
 			 */
-			referencedTablePartitionColumn = DistPartitionKey(referencedTableId);
+			referencedTablePartitionColumn = PartitionKey(referencedTableId);
 		}
 		else
 		{
@@ -2489,7 +2131,6 @@ ErrorIfDistributedAlterSeqOwnedBy(AlterSeqStmt *alterSeqStmt)
 {
 	Oid sequenceId = RangeVarGetRelid(alterSeqStmt->sequence, AccessShareLock,
 									  alterSeqStmt->missing_ok);
-	bool sequenceOwned = false;
 	Oid ownedByTableId = InvalidOid;
 	Oid newOwnedByTableId = InvalidOid;
 	int32 ownedByColumnId = 0;
@@ -2501,20 +2142,8 @@ ErrorIfDistributedAlterSeqOwnedBy(AlterSeqStmt *alterSeqStmt)
 		return;
 	}
 
-#if (PG_VERSION_NUM >= 100000)
-	sequenceOwned = sequenceIsOwned(sequenceId, DEPENDENCY_AUTO, &ownedByTableId,
-									&ownedByColumnId);
-	if (!sequenceOwned)
-	{
-		sequenceOwned = sequenceIsOwned(sequenceId, DEPENDENCY_INTERNAL, &ownedByTableId,
-										&ownedByColumnId);
-	}
-#else
-	sequenceOwned = sequenceIsOwned(sequenceId, &ownedByTableId, &ownedByColumnId);
-#endif
-
-	/* see whether the sequence is already owned by a distributed table */
-	if (sequenceOwned)
+	/* see whether the sequences is already owned by a distributed table */
+	if (sequenceIsOwned(sequenceId, &ownedByTableId, &ownedByColumnId))
 	{
 		hasDistributedOwner = IsDistributedTable(ownedByTableId);
 	}
@@ -2711,9 +2340,8 @@ CreateLocalTable(RangeVar *relation, char *nodeName, int32 nodePort)
 		/* run only a selected set of DDL commands */
 		if (applyDDLCommand)
 		{
-			CitusProcessUtility(ddlCommandNode, CreateCommandTag(ddlCommandNode),
-								PROCESS_UTILITY_TOPLEVEL, NULL, None_Receiver, NULL);
-
+			ProcessUtility(ddlCommandNode, CreateCommandTag(ddlCommandNode),
+						   PROCESS_UTILITY_TOPLEVEL, NULL, None_Receiver, NULL);
 			CommandCounterIncrement();
 		}
 	}
@@ -2752,47 +2380,6 @@ IsAlterTableRenameStmt(RenameStmt *renameStmt)
 
 
 /*
- * AlterInvolvesPartitionColumn checks if the given alter table command
- * involves relation's partition column.
- */
-static bool
-AlterInvolvesPartitionColumn(AlterTableStmt *alterTableStatement,
-							 AlterTableCmd *command)
-{
-	bool involvesPartitionColumn = false;
-	Var *partitionColumn = NULL;
-	HeapTuple tuple = NULL;
-	char *alterColumnName = command->name;
-
-	LOCKMODE lockmode = AlterTableGetLockLevel(alterTableStatement->cmds);
-	Oid relationId = AlterTableLookupRelation(alterTableStatement, lockmode);
-	if (!OidIsValid(relationId))
-	{
-		return false;
-	}
-
-	partitionColumn = DistPartitionKey(relationId);
-
-	tuple = SearchSysCacheAttName(relationId, alterColumnName);
-	if (HeapTupleIsValid(tuple))
-	{
-		Form_pg_attribute targetAttr = (Form_pg_attribute) GETSTRUCT(tuple);
-
-		/* reference tables do not have partition column, so allow them */
-		if (partitionColumn != NULL &&
-			targetAttr->attnum == partitionColumn->varattno)
-		{
-			involvesPartitionColumn = true;
-		}
-
-		ReleaseSysCache(tuple);
-	}
-
-	return involvesPartitionColumn;
-}
-
-
-/*
  * ExecuteDistributedDDLJob simply executes a provided DDLJob in a distributed trans-
  * action, including metadata sync if needed. If the multi shard commit protocol is
  * in its default value of '1pc', then a notice message indicating that '2pc' might be
@@ -2804,6 +2391,14 @@ static void
 ExecuteDistributedDDLJob(DDLJob *ddlJob)
 {
 	bool shouldSyncMetadata = ShouldSyncTableMetadata(ddlJob->targetRelationId);
+
+	if (XactModificationLevel == XACT_MODIFICATION_DATA)
+	{
+		ereport(ERROR, (errcode(ERRCODE_ACTIVE_SQL_TRANSACTION),
+						errmsg("distributed DDL commands must not appear within "
+							   "transaction blocks containing single-shard data "
+							   "modifications")));
+	}
 
 	EnsureCoordinator();
 
@@ -3026,17 +2621,16 @@ DropIndexTaskList(Oid relationId, Oid indexId, DropStmt *dropStmt)
 
 
 /*
- * InterShardDDLTaskList builds a list of tasks to execute a inter shard DDL command on a
- * shards of given list of distributed table. At the moment this function is used to run
- * foreign key and partitioning command on worker node.
+ * ForeignKeyTaskList builds a list of tasks to execute a foreign key command on a
+ * shards of given list of distributed table.
  *
- * leftRelationId is the relation id of actual distributed table which given command is
- * applied. rightRelationId is the relation id of distributed table which given command
- * refers to.
+ * leftRelationId is the relation id of actual distributed table which given foreign key
+ * command is applied. rightRelationId is the relation id of distributed table which
+ * foreign key refers to.
  */
 static List *
-InterShardDDLTaskList(Oid leftRelationId, Oid rightRelationId,
-					  const char *commandString)
+ForeignKeyTaskList(Oid leftRelationId, Oid rightRelationId,
+				   const char *commandString)
 {
 	List *taskList = NIL;
 
@@ -3380,7 +2974,8 @@ PostProcessUtility(Node *parsetree)
 	indexForm = (Form_pg_index) GETSTRUCT(indexTuple);
 	indexForm->indisvalid = true;
 
-	CatalogTupleUpdate(pg_index, &indexTuple->t_self, indexTuple);
+	simple_heap_update(pg_index, &indexTuple->t_self, indexTuple);
+	CatalogUpdateIndexes(pg_index, indexTuple);
 
 	/* clean up; index now marked valid, but ROLLBACK will mark invalid */
 	heap_freetuple(indexTuple);

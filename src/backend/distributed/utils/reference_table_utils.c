@@ -28,7 +28,6 @@
 #include "distributed/transaction_management.h"
 #include "distributed/worker_manager.h"
 #include "distributed/worker_transaction.h"
-#include "storage/lmgr.h"
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
@@ -40,6 +39,7 @@ static void ReplicateShardToAllWorkers(ShardInterval *shardInterval);
 static void ReplicateShardToNode(ShardInterval *shardInterval, char *nodeName,
 								 int nodePort);
 static void ConvertToReferenceTableMetadata(Oid relationId, uint64 shardId);
+static int CompareOids(const void *leftElement, const void *rightElement);
 
 /* exports for SQL callable functions */
 PG_FUNCTION_INFO_V1(upgrade_to_reference_table);
@@ -128,7 +128,7 @@ ReplicateAllReferenceTablesToNode(char *nodeName, int nodePort)
 {
 	List *referenceTableList = ReferenceTableOidList();
 	ListCell *referenceTableCell = NULL;
-	List *workerNodeList = ActivePrimaryNodeList();
+	List *workerNodeList = ActiveWorkerNodeList();
 	uint32 workerCount = 0;
 	Oid firstReferenceTableId = InvalidOid;
 	uint32 referenceTableColocationId = INVALID_COLOCATION_ID;
@@ -211,7 +211,7 @@ ReplicateSingleShardTableToAllWorkers(Oid relationId)
 	/*
 	 * After the table has been officially marked as a reference table, we need to create
 	 * the reference table itself and insert its pg_dist_partition, pg_dist_shard and
-	 * existing pg_dist_placement rows.
+	 * existing pg_dist_shard_placement rows.
 	 */
 	CreateTableMetadataOnWorkers(relationId);
 }
@@ -227,13 +227,10 @@ ReplicateSingleShardTableToAllWorkers(Oid relationId)
 static void
 ReplicateShardToAllWorkers(ShardInterval *shardInterval)
 {
-	List *workerNodeList = NULL;
+	/* we do not use pgDistNode, we only obtain a lock on it to prevent modifications */
+	Relation pgDistNode = heap_open(DistNodeRelationId(), AccessShareLock);
+	List *workerNodeList = ActiveWorkerNodeList();
 	ListCell *workerNodeCell = NULL;
-
-	/* prevent concurrent pg_dist_node changes */
-	LockRelationOid(DistNodeRelationId(), RowShareLock);
-
-	workerNodeList = ActivePrimaryNodeList();
 
 	/*
 	 * We will iterate over all worker nodes and if healthy placement is not exist at
@@ -249,6 +246,8 @@ ReplicateShardToAllWorkers(ShardInterval *shardInterval)
 
 		ReplicateShardToNode(shardInterval, nodeName, nodePort);
 	}
+
+	heap_close(pgDistNode, NoLock);
 }
 
 
@@ -256,7 +255,7 @@ ReplicateShardToAllWorkers(ShardInterval *shardInterval)
  * ReplicateShardToNode function replicates given shard to the given worker node
  * in a separate transaction. While replicating, it only replicates the shard to the
  * workers which does not have a healthy replica of the shard. This function also modifies
- * metadata by inserting/updating related rows in pg_dist_placement.
+ * metadata by inserting/updating related rows in pg_dist_shard_placement.
  */
 static void
 ReplicateShardToNode(ShardInterval *shardInterval, char *nodeName, int nodePort)
@@ -281,12 +280,11 @@ ReplicateShardToNode(ShardInterval *shardInterval, char *nodeName, int nodePort)
 	 * placements always have shardState = FILE_FINALIZED, in case of an upgrade of
 	 * a non-reference table to reference table, unhealty placements may exist. In
 	 * this case, we repair the shard placement and update its state in
-	 * pg_dist_placement table.
+	 * pg_dist_shard_placement table.
 	 */
 	if (targetPlacement == NULL || targetPlacement->shardState != FILE_FINALIZED)
 	{
 		uint64 placementId = 0;
-		uint32 groupId = 0;
 
 		ereport(NOTICE, (errmsg("Replicating reference table \"%s\" to the node %s:%d",
 								get_rel_name(shardInterval->relationId), nodeName,
@@ -296,14 +294,12 @@ ReplicateShardToNode(ShardInterval *shardInterval, char *nodeName, int nodePort)
 												   ddlCommandList);
 		if (targetPlacement == NULL)
 		{
-			groupId = GroupForNode(nodeName, nodePort);
-
 			placementId = GetNextPlacementId();
-			InsertShardPlacementRow(shardId, placementId, FILE_FINALIZED, 0, groupId);
+			InsertShardPlacementRow(shardId, placementId, FILE_FINALIZED, 0,
+									nodeName, nodePort);
 		}
 		else
 		{
-			groupId = targetPlacement->groupId;
 			placementId = targetPlacement->placementId;
 			UpdateShardPlacementState(placementId, FILE_FINALIZED);
 		}
@@ -319,7 +315,7 @@ ReplicateShardToNode(ShardInterval *shardInterval, char *nodeName, int nodePort)
 		{
 			char *placementCommand = PlacementUpsertCommand(shardId, placementId,
 															FILE_FINALIZED, 0,
-															groupId);
+															nodeName, nodePort);
 
 			SendCommandToWorkers(WORKERS_WITH_METADATA, placementCommand);
 		}
@@ -366,7 +362,7 @@ uint32
 CreateReferenceTableColocationId()
 {
 	uint32 colocationId = INVALID_COLOCATION_ID;
-	List *workerNodeList = ActivePrimaryNodeList();
+	List *workerNodeList = ActiveWorkerNodeList();
 	int shardCount = 1;
 	int replicationFactor = list_length(workerNodeList);
 	Oid distributionColumnType = InvalidOid;
@@ -384,13 +380,13 @@ CreateReferenceTableColocationId()
 
 
 /*
- * DeleteAllReferenceTablePlacementsFromNodeGroup function iterates over list of reference
- * tables and deletes all reference table placements from pg_dist_placement table
- * for given group. However, it does not modify replication factor of the colocation
+ * DeleteAllReferenceTablePlacementsFromNode function iterates over list of reference
+ * tables and deletes all reference table placements from pg_dist_shard_placement table
+ * for given worker node. However, it does not modify replication factor of the colocation
  * group of reference tables. It is caller's responsibility to do that if it is necessary.
  */
 void
-DeleteAllReferenceTablePlacementsFromNodeGroup(uint32 groupId)
+DeleteAllReferenceTablePlacementsFromNode(char *workerName, uint32 workerPort)
 {
 	List *referenceTableList = ReferenceTableOidList();
 	ListCell *referenceTableCell = NULL;
@@ -403,32 +399,26 @@ DeleteAllReferenceTablePlacementsFromNodeGroup(uint32 groupId)
 
 	/*
 	 * We sort the reference table list to prevent deadlocks in concurrent
-	 * DeleteAllReferenceTablePlacementsFromNodeGroup calls.
+	 * DeleteAllReferenceTablePlacementsFromNode calls.
 	 */
 	referenceTableList = SortList(referenceTableList, CompareOids);
 	foreach(referenceTableCell, referenceTableList)
 	{
-		GroupShardPlacement *placement = NULL;
+		Oid referenceTableId = lfirst_oid(referenceTableCell);
+
+		List *shardIntervalList = LoadShardIntervalList(referenceTableId);
+		ShardInterval *shardInterval = (ShardInterval *) linitial(shardIntervalList);
+		uint64 shardId = shardInterval->shardId;
+		uint64 placementId = INVALID_PLACEMENT_ID;
 		StringInfo deletePlacementCommand = makeStringInfo();
 
-		Oid referenceTableId = lfirst_oid(referenceTableCell);
-		List *placements = GroupShardPlacementsForTableOnGroup(referenceTableId,
-															   groupId);
-		if (list_length(placements) == 0)
-		{
-			/* this happens if the node was previously disabled */
-			continue;
-		}
+		LockShardDistributionMetadata(shardId, ExclusiveLock);
 
-		placement = (GroupShardPlacement *) linitial(placements);
-
-		LockShardDistributionMetadata(placement->shardId, ExclusiveLock);
-
-		DeleteShardPlacementRow(placement->placementId);
+		placementId = DeleteShardPlacementRow(shardId, workerName, workerPort);
 
 		appendStringInfo(deletePlacementCommand,
-						 "DELETE FROM pg_dist_placement WHERE placementid=%lu",
-						 placement->placementId);
+						 "DELETE FROM pg_dist_shard_placement WHERE placementid=%lu",
+						 placementId);
 		SendCommandToWorkers(WORKERS_WITH_METADATA, deletePlacementCommand->data);
 	}
 }
@@ -467,7 +457,7 @@ ReferenceTableOidList()
 
 
 /* CompareOids is a comparison function for sort shard oids */
-int
+static int
 CompareOids(const void *leftElement, const void *rightElement)
 {
 	Oid *leftId = (Oid *) leftElement;

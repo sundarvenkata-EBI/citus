@@ -7,6 +7,8 @@
 -- coming from postgresql.conf or multi_task_tracker_executor.conf.
 
 
+ALTER SEQUENCE pg_catalog.pg_dist_shardid_seq RESTART 1300000;
+
 -- connect to master
 \c - - - :master_port
 
@@ -47,6 +49,8 @@ LIMIT 20;
 -- connect one of the workers
 \c - - - :worker_1_port
 
+ALTER SEQUENCE pg_catalog.pg_dist_shardid_seq RESTART 1300000;
+
 SELECT
 	c_custkey,
 	c_name,
@@ -82,6 +86,8 @@ LIMIT 20;
 
 -- connect to the other worker
 \c - - - :worker_2_port
+
+ALTER SEQUENCE pg_catalog.pg_dist_shardid_seq RESTART 1300000;
 
 SELECT
 	c_custkey,

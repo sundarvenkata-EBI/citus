@@ -9,20 +9,17 @@
 
 #include "postgres.h"
 
-#include <float.h>
 #include <limits.h>
 
 #include "catalog/pg_type.h"
 
 #include "distributed/citus_nodefuncs.h"
 #include "distributed/citus_nodes.h"
-#include "distributed/insert_select_planner.h"
 #include "distributed/metadata_cache.h"
 #include "distributed/multi_executor.h"
 #include "distributed/multi_planner.h"
 #include "distributed/multi_logical_optimizer.h"
 #include "distributed/multi_logical_planner.h"
-#include "distributed/multi_partitioning_utils.h"
 #include "distributed/multi_physical_planner.h"
 #include "distributed/multi_master_planner.h"
 #include "distributed/multi_router_planner.h"
@@ -32,7 +29,6 @@
 #include "parser/parsetree.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/planner.h"
-#include "utils/lsyscache.h"
 #include "utils/memutils.h"
 
 
@@ -54,11 +50,6 @@ static CustomScanMethods RouterCustomScanMethods = {
 	RouterCreateScan
 };
 
-static CustomScanMethods CoordinatorInsertSelectCustomScanMethods = {
-	"Citus INSERT ... SELECT via coordinator",
-	CoordinatorInsertSelectCreateScan
-};
-
 static CustomScanMethods DelayedErrorCustomScanMethods = {
 	"Citus Delayed Error",
 	DelayedErrorCreateScan
@@ -70,15 +61,15 @@ static PlannedStmt * CreateDistributedPlan(PlannedStmt *localPlan, Query *origin
 										   Query *query, ParamListInfo boundParams,
 										   PlannerRestrictionContext *
 										   plannerRestrictionContext);
-static void AdjustParseTree(Query *parse, bool assignRTEIdentities,
-							bool setPartitionedTablesInherited);
+static void AssignRTEIdentities(Query *queryTree);
 static void AssignRTEIdentity(RangeTblEntry *rangeTableEntry, int rteIdentifier);
+static Node * SerializeMultiPlan(struct MultiPlan *multiPlan);
+static MultiPlan * DeserializeMultiPlan(Node *node);
 static PlannedStmt * FinalizePlan(PlannedStmt *localPlan, MultiPlan *multiPlan);
 static PlannedStmt * FinalizeNonRouterPlan(PlannedStmt *localPlan, MultiPlan *multiPlan,
 										   CustomScan *customScan);
 static PlannedStmt * FinalizeRouterPlan(PlannedStmt *localPlan, CustomScan *customScan);
 static void CheckNodeIsDumpable(Node *node);
-static Node * CheckNodeCopyAndSerialization(Node *node);
 static List * CopyPlanParamList(List *originalPlanParamList);
 static PlannerRestrictionContext * CreateAndPushPlannerRestrictionContext(void);
 static PlannerRestrictionContext * CurrentPlannerRestrictionContext(void);
@@ -94,9 +85,8 @@ multi_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 	bool needsDistributedPlanning = NeedsDistributedPlanning(parse);
 	Query *originalQuery = NULL;
 	PlannerRestrictionContext *plannerRestrictionContext = NULL;
-	bool assignRTEIdentities = false;
-	bool setPartitionedTablesInherited = false;
 
+	ereport(WARNING, (errmsg("Came to line 89 in multi_planner.c")));
 	/*
 	 * standard_planner scribbles on it's input, but for deparsing we need the
 	 * unmodified form. So copy once we're sure it's a distributed query.
@@ -104,15 +94,14 @@ multi_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 	if (needsDistributedPlanning)
 	{
 		originalQuery = copyObject(parse);
-		assignRTEIdentities = true;
-		setPartitionedTablesInherited = false;
 
-		AdjustParseTree(parse, assignRTEIdentities, setPartitionedTablesInherited);
+		AssignRTEIdentities(parse);
 	}
 
 	/* create a restriction context and put it at the end if context list */
 	plannerRestrictionContext = CreateAndPushPlannerRestrictionContext();
 
+	
 	PG_TRY();
 	{
 		/*
@@ -134,14 +123,6 @@ multi_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
-
-	if (needsDistributedPlanning)
-	{
-		assignRTEIdentities = false;
-		setPartitionedTablesInherited = true;
-
-		AdjustParseTree(parse, assignRTEIdentities, setPartitionedTablesInherited);
-	}
 
 	/* remove the context from the context list */
 	PopPlannerRestrictionContext();
@@ -167,18 +148,19 @@ multi_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 
 
 /*
- * AdjustParseTree function modifies query tree by adding RTE identities to the
- * RTE_RELATIONs and changing inh flag and relkind of partitioned tables. We
- * perform these operations to ensure PostgreSQL's standard planner behaves as
- * we need.
+ * AssignRTEIdentities assigns unique identities to the
+ * RTE_RELATIONs in the given query.
  *
- * Please note that, we want to avoid modifying query tree as much as possible
- * because if PostgreSQL changes the way it uses modified fields, that may break
- * our logic.
+ * To be able to track individual RTEs through postgres' query
+ * planning, we need to be able to figure out whether an RTE is
+ * actually a copy of another, rather than a different one. We
+ * simply number the RTEs starting from 1.
+ *
+ * Note that we're only interested in RTE_RELATIONs and thus assigning
+ * identifiers to those RTEs only.
  */
 static void
-AdjustParseTree(Query *queryTree, bool assignRTEIdentities,
-				bool setPartitionedTablesInherited)
+AssignRTEIdentities(Query *queryTree)
 {
 	List *rangeTableList = NIL;
 	ListCell *rangeTableCell = NULL;
@@ -191,42 +173,12 @@ AdjustParseTree(Query *queryTree, bool assignRTEIdentities,
 	{
 		RangeTblEntry *rangeTableEntry = (RangeTblEntry *) lfirst(rangeTableCell);
 
-		/*
-		 * To be able to track individual RTEs through PostgreSQL's query
-		 * planning, we need to be able to figure out whether an RTE is
-		 * actually a copy of another, rather than a different one. We
-		 * simply number the RTEs starting from 1.
-		 *
-		 * Note that we're only interested in RTE_RELATIONs and thus assigning
-		 * identifiers to those RTEs only.
-		 */
-		if (assignRTEIdentities && rangeTableEntry->rtekind == RTE_RELATION)
+		if (rangeTableEntry->rtekind != RTE_RELATION)
 		{
-			AssignRTEIdentity(rangeTableEntry, rteIdentifier++);
+			continue;
 		}
 
-		/*
-		 * We want Postgres to behave partitioned tables as regular relations
-		 * (i.e. we do not want to expand them to their partitions). To do this
-		 * we set each distributed partitioned table's inh flag to appropriate
-		 * value before and after dropping to the standart_planner.
-		 */
-		if (IsDistributedTable(rangeTableEntry->relid) &&
-			PartitionedTable(rangeTableEntry->relid))
-		{
-			rangeTableEntry->inh = setPartitionedTablesInherited;
-
-#if (PG_VERSION_NUM >= 100000)
-			if (setPartitionedTablesInherited)
-			{
-				rangeTableEntry->relkind = RELKIND_PARTITIONED_TABLE;
-			}
-			else
-			{
-				rangeTableEntry->relkind = RELKIND_RELATION;
-			}
-#endif
-		}
+		AssignRTEIdentity(rangeTableEntry, rteIdentifier++);
 	}
 }
 
@@ -274,7 +226,7 @@ IsModifyCommand(Query *query)
 	CmdType commandType = query->commandType;
 
 	if (commandType == CMD_INSERT || commandType == CMD_UPDATE ||
-		commandType == CMD_DELETE)
+		commandType == CMD_DELETE || query->hasModifyingCTE)
 	{
 		return true;
 	}
@@ -310,10 +262,12 @@ static PlannedStmt *
 CreateDistributedPlan(PlannedStmt *localPlan, Query *originalQuery, Query *query,
 					  ParamListInfo boundParams,
 					  PlannerRestrictionContext *plannerRestrictionContext)
-{
+{	
 	MultiPlan *distributedPlan = NULL;
 	PlannedStmt *resultPlan = NULL;
 	bool hasUnresolvedParams = false;
+	
+	ereport(WARNING, (errmsg("Came to line 268 in multi_planner.c")));
 
 	if (HasUnresolvedExternParamsWalker((Node *) originalQuery, boundParams))
 	{
@@ -322,22 +276,15 @@ CreateDistributedPlan(PlannedStmt *localPlan, Query *originalQuery, Query *query
 
 	if (IsModifyCommand(query))
 	{
-		if (InsertSelectIntoDistributedTable(originalQuery))
-		{
-			distributedPlan =
-				CreateInsertSelectPlan(originalQuery, plannerRestrictionContext);
-		}
-		else
-		{
-			/* modifications are always routed through the same planner/executor */
-			distributedPlan =
-				CreateModifyPlan(originalQuery, query, plannerRestrictionContext);
-		}
+		/* modifications are always routed through the same planner/executor */
+		distributedPlan =
+			CreateModifyPlan(originalQuery, query, plannerRestrictionContext);
 
 		Assert(distributedPlan);
 	}
 	else
 	{
+		ereport(WARNING, (errmsg("Came to line 287 in multi_planner.c")));
 		/*
 		 * For select queries we, if router executor is enabled, first try to
 		 * plan the query as a router query. If not supported, otherwise try
@@ -358,6 +305,7 @@ CreateDistributedPlan(PlannedStmt *localPlan, Query *originalQuery, Query *query
 				RaiseDeferredError(distributedPlan->planningError, DEBUG1);
 			}
 		}
+		ereport(WARNING, (errmsg("Came to line 308 in multi_planner.c")));
 
 		/*
 		 * Router didn't yield a plan, try the full distributed planner. As
@@ -367,10 +315,12 @@ CreateDistributedPlan(PlannedStmt *localPlan, Query *originalQuery, Query *query
 		 */
 		if ((!distributedPlan || distributedPlan->planningError) && !hasUnresolvedParams)
 		{
+			ereport(WARNING, (errmsg("Came to line 318 in multi_planner.c")));
 			MultiTreeRoot *logicalPlan = MultiLogicalPlanCreate(originalQuery, query,
 																plannerRestrictionContext,
 																boundParams);
 			MultiLogicalPlanOptimize(logicalPlan);
+			ereport(WARNING, (errmsg("Came to line 323 in multi_planner.c")));
 
 			/*
 			 * This check is here to make it likely that all node types used in
@@ -380,11 +330,12 @@ CreateDistributedPlan(PlannedStmt *localPlan, Query *originalQuery, Query *query
 			 * physical plan, so there's no need to check that separately.
 			 */
 			CheckNodeIsDumpable((Node *) logicalPlan);
-
+			ereport(WARNING, (errmsg("Came to line 333 in multi_planner.c")));
 			/* Create the physical plan */
 			distributedPlan = MultiPhysicalPlanCreate(logicalPlan,
 													  plannerRestrictionContext);
 
+			ereport(WARNING, (errmsg("Came to line 337 in multi_planner.c")));
 			/* distributed plan currently should always succeed or error out */
 			Assert(distributedPlan && distributedPlan->planningError == NULL);
 		}
@@ -455,17 +406,60 @@ CreateDistributedPlan(PlannedStmt *localPlan, Query *originalQuery, Query *query
 MultiPlan *
 GetMultiPlan(CustomScan *customScan)
 {
-	Node *node = NULL;
 	MultiPlan *multiPlan = NULL;
 
 	Assert(list_length(customScan->custom_private) == 1);
 
-	node = (Node *) linitial(customScan->custom_private);
-	Assert(CitusIsA(node, MultiPlan));
+	multiPlan = DeserializeMultiPlan(linitial(customScan->custom_private));
 
-	node = CheckNodeCopyAndSerialization(node);
+	return multiPlan;
+}
 
-	multiPlan = (MultiPlan *) node;
+
+/*
+ * SerializeMultiPlan returns the string representing the distributed plan in a
+ * Const node.
+ *
+ * Note that this should be improved for 9.6+, we we can copy trees efficiently.
+ * I.e. we should introduce copy support for relevant node types, and just
+ * return the MultiPlan as-is for 9.6.
+ */
+static Node *
+SerializeMultiPlan(MultiPlan *multiPlan)
+{
+	char *serializedMultiPlan = NULL;
+	Const *multiPlanData = NULL;
+
+	serializedMultiPlan = CitusNodeToString(multiPlan);
+
+	multiPlanData = makeNode(Const);
+	multiPlanData->consttype = CSTRINGOID;
+	multiPlanData->constlen = strlen(serializedMultiPlan);
+	multiPlanData->constvalue = CStringGetDatum(serializedMultiPlan);
+	multiPlanData->constbyval = false;
+	multiPlanData->location = -1;
+
+	return (Node *) multiPlanData;
+}
+
+
+/*
+ * DeserializeMultiPlan returns the deserialized distributed plan from the string
+ * representation in a Const node.
+ */
+static MultiPlan *
+DeserializeMultiPlan(Node *node)
+{
+	Const *multiPlanData = NULL;
+	char *serializedMultiPlan = NULL;
+	MultiPlan *multiPlan = NULL;
+
+	Assert(IsA(node, Const));
+	multiPlanData = (Const *) node;
+	serializedMultiPlan = DatumGetCString(multiPlanData->constvalue);
+
+	multiPlan = (MultiPlan *) CitusStringToNode(serializedMultiPlan);
+	Assert(CitusIsA(multiPlan, MultiPlan));
 
 	return multiPlan;
 }
@@ -478,10 +472,13 @@ GetMultiPlan(CustomScan *customScan)
 static PlannedStmt *
 FinalizePlan(PlannedStmt *localPlan, MultiPlan *multiPlan)
 {
-	PlannedStmt *finalPlan = NULL;
+	PlannedStmt *finalPlan = NULL;	
+	ereport(WARNING, (errmsg("Came to line 472 in multi_planner.c")));
 	CustomScan *customScan = makeNode(CustomScan);
 	Node *multiPlanData = NULL;
 	MultiExecutorType executorType = MULTI_EXECUTOR_INVALID_FIRST;
+	
+	ereport(WARNING, (errmsg("Came to line 475 in multi_planner.c")));
 
 	if (!multiPlan->planningError)
 	{
@@ -508,12 +505,6 @@ FinalizePlan(PlannedStmt *localPlan, MultiPlan *multiPlan)
 			break;
 		}
 
-		case MULTI_EXECUTOR_COORDINATOR_INSERT_SELECT:
-		{
-			customScan->methods = &CoordinatorInsertSelectCustomScanMethods;
-			break;
-		}
-
 		default:
 		{
 			customScan->methods = &DelayedErrorCustomScanMethods;
@@ -521,11 +512,12 @@ FinalizePlan(PlannedStmt *localPlan, MultiPlan *multiPlan)
 		}
 	}
 
-	multiPlanData = (Node *) multiPlan;
+	multiPlanData = SerializeMultiPlan(multiPlan);
 
 	customScan->custom_private = list_make1(multiPlanData);
 	customScan->flags = CUSTOMPATH_SUPPORT_BACKWARD_SCAN;
 
+	/* check if we have a master query */
 	if (multiPlan->masterQuery)
 	{
 		finalPlan = FinalizeNonRouterPlan(localPlan, multiPlan, customScan);
@@ -653,45 +645,15 @@ RemoteScanRangeTableEntry(List *columnNameList)
 
 /*
  * CheckNodeIsDumpable checks that the passed node can be dumped using
- * nodeToString(). As this checks is expensive, it's only active when
+ * CitusNodeToString(). As this checks is expensive, it's only active when
  * assertions are enabled.
  */
 static void
 CheckNodeIsDumpable(Node *node)
 {
 #ifdef USE_ASSERT_CHECKING
-	char *out = nodeToString(node);
+	char *out = CitusNodeToString(node);
 	pfree(out);
-#endif
-}
-
-
-/*
- * CheckNodeCopyAndSerialization checks copy/dump/read functions
- * for nodes and returns copy of the input.
- *
- * It is only active when assertions are enabled, otherwise it returns
- * the input directly. We use this to confirm that our serialization
- * and copy logic produces the correct plan during regression tests.
- *
- * It does not check string equality on node dumps due to differences
- * in some Postgres types.
- */
-static Node *
-CheckNodeCopyAndSerialization(Node *node)
-{
-#ifdef USE_ASSERT_CHECKING
-	char *out = nodeToString(node);
-	Node *deserializedNode = (Node *) stringToNode(out);
-	Node *nodeCopy = copyObject(deserializedNode);
-	char *outCopy = nodeToString(nodeCopy);
-
-	pfree(out);
-	pfree(outCopy);
-
-	return nodeCopy;
-#else
-	return node;
 #endif
 }
 

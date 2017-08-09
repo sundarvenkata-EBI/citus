@@ -77,7 +77,8 @@ ORDER BY attnum;
 (27 rows)
 
 \c - - - :master_port
-SELECT "Column", "Type", "Modifiers" FROM table_desc WHERE relid='public.lineitem_alter'::regclass;
+\d lineitem_alter
+            Table "public.lineitem_alter"
      Column      |         Type          | Modifiers 
 -----------------+-----------------------+-----------
  l_orderkey      | bigint                | not null
@@ -101,7 +102,6 @@ SELECT "Column", "Type", "Modifiers" FROM table_desc WHERE relid='public.lineite
  int_column1     | integer               | default 1
  int_column2     | integer               | default 2
  null_column     | integer               | 
-(21 rows)
 
 SELECT float_column, count(*) FROM lineitem_alter GROUP BY float_column;
  float_column | count 
@@ -138,7 +138,8 @@ SELECT int_column1, count(*) FROM lineitem_alter GROUP BY int_column1;
 
 -- Verify that SET NOT NULL works
 ALTER TABLE lineitem_alter ALTER COLUMN int_column2 SET NOT NULL;
-SELECT "Column", "Type", "Modifiers" FROM table_desc WHERE relid='public.lineitem_alter'::regclass;
+\d lineitem_alter
+                Table "public.lineitem_alter"
      Column      |         Type          |     Modifiers      
 -----------------+-----------------------+--------------------
  l_orderkey      | bigint                | not null
@@ -162,7 +163,6 @@ SELECT "Column", "Type", "Modifiers" FROM table_desc WHERE relid='public.lineite
  int_column1     | integer               | 
  int_column2     | integer               | not null default 2
  null_column     | integer               | 
-(21 rows)
 
 -- Drop default so that NULLs will be inserted for this column
 ALTER TABLE lineitem_alter ALTER COLUMN int_column2 DROP DEFAULT;
@@ -173,7 +173,8 @@ ERROR:  null value in column "int_column2" violates not-null constraint
 DETAIL:  Failing row contains (1, 155190, 7706, 1, 17.00, 21168.23, 0.04, 0.02, N, O, 1996-03-13, 1996-02-12, 1996-03-22, DELIVER IN PERSON        , TRUCK     , egular courts above the, 1, null, null, null, null).
 -- Verify that DROP NOT NULL works
 ALTER TABLE lineitem_alter ALTER COLUMN int_column2 DROP NOT NULL;
-SELECT "Column", "Type", "Modifiers" FROM table_desc WHERE relid='public.lineitem_alter'::regclass;
+\d lineitem_alter
+            Table "public.lineitem_alter"
      Column      |         Type          | Modifiers 
 -----------------+-----------------------+-----------
  l_orderkey      | bigint                | not null
@@ -197,7 +198,6 @@ SELECT "Column", "Type", "Modifiers" FROM table_desc WHERE relid='public.lineite
  int_column1     | integer               | 
  int_column2     | integer               | 
  null_column     | integer               | 
-(21 rows)
 
 -- \copy should succeed now 
 \copy lineitem_alter (l_orderkey, l_partkey, l_suppkey, l_linenumber, l_quantity, l_extendedprice, l_discount, l_tax, l_returnflag, l_linestatus, l_shipdate, l_commitdate, l_receiptdate, l_shipinstruct, l_shipmode, l_comment) FROM '@abs_srcdir@/data/lineitem.1.data' with delimiter '|'
@@ -216,7 +216,8 @@ SELECT int_column2, pg_typeof(int_column2), count(*) from lineitem_alter GROUP B
 (2 rows)
 
 ALTER TABLE lineitem_alter ALTER COLUMN int_column2 SET DATA TYPE FLOAT;
-SELECT "Column", "Type", "Modifiers" FROM table_desc WHERE relid='public.lineitem_alter'::regclass;
+\d lineitem_alter
+            Table "public.lineitem_alter"
      Column      |         Type          | Modifiers 
 -----------------+-----------------------+-----------
  l_orderkey      | bigint                | not null
@@ -240,7 +241,6 @@ SELECT "Column", "Type", "Modifiers" FROM table_desc WHERE relid='public.lineite
  int_column1     | integer               | 
  int_column2     | double precision      | 
  null_column     | integer               | 
-(21 rows)
 
 SELECT int_column2, pg_typeof(int_column2), count(*) from lineitem_alter GROUP BY int_column2;
  int_column2 |    pg_typeof     | count 
@@ -280,7 +280,8 @@ SELECT SUM(l_orderkey) FROM lineitem_alter;
  53620791
 (1 row)
 
-SELECT "Column", "Type", "Modifiers" FROM table_desc WHERE relid='public.lineitem_alter'::regclass;
+\d lineitem_alter
+            Table "public.lineitem_alter"
      Column      |         Type          | Modifiers 
 -----------------+-----------------------+-----------
  l_orderkey      | bigint                | not null
@@ -300,12 +301,12 @@ SELECT "Column", "Type", "Modifiers" FROM table_desc WHERE relid='public.lineite
  l_shipmode      | character(10)         | not null
  l_comment       | character varying(44) | not null
  null_column     | integer               | 
-(17 rows)
 
 -- Verify that we can execute commands with multiple subcommands
 ALTER TABLE lineitem_alter ADD COLUMN int_column1 INTEGER,
 	ADD COLUMN int_column2 INTEGER;
-SELECT "Column", "Type", "Modifiers" FROM table_desc WHERE relid='public.lineitem_alter'::regclass;
+\d lineitem_alter
+            Table "public.lineitem_alter"
      Column      |         Type          | Modifiers 
 -----------------+-----------------------+-----------
  l_orderkey      | bigint                | not null
@@ -327,14 +328,14 @@ SELECT "Column", "Type", "Modifiers" FROM table_desc WHERE relid='public.lineite
  null_column     | integer               | 
  int_column1     | integer               | 
  int_column2     | integer               | 
-(19 rows)
 
 ALTER TABLE lineitem_alter ADD COLUMN int_column3 INTEGER,
 	ALTER COLUMN int_column1 SET STATISTICS 10;
 ERROR:  alter table command is currently unsupported
-DETAIL:  Only ADD|DROP COLUMN, SET|DROP NOT NULL, SET|DROP DEFAULT, ADD|DROP CONSTRAINT, ATTACH|DETACH PARTITION and TYPE subcommands are supported.
+DETAIL:  Only ADD|DROP COLUMN, SET|DROP NOT NULL, SET|DROP DEFAULT, ADD|DROP CONSTRAINT and TYPE subcommands are supported.
 ALTER TABLE lineitem_alter DROP COLUMN int_column1, DROP COLUMN int_column2;
-SELECT "Column", "Type", "Modifiers" FROM table_desc WHERE relid='public.lineitem_alter'::regclass;
+\d lineitem_alter
+            Table "public.lineitem_alter"
      Column      |         Type          | Modifiers 
 -----------------+-----------------------+-----------
  l_orderkey      | bigint                | not null
@@ -354,7 +355,6 @@ SELECT "Column", "Type", "Modifiers" FROM table_desc WHERE relid='public.lineite
  l_shipmode      | character(10)         | not null
  l_comment       | character varying(44) | not null
  null_column     | integer               | 
-(17 rows)
 
 -- Verify that we cannot execute alter commands on the distribution column
 ALTER TABLE lineitem_alter ALTER COLUMN l_orderkey DROP NOT NULL;
@@ -364,12 +364,12 @@ ERROR:  cannot execute ALTER TABLE command involving partition column
 -- Verify that we error out on unsupported statement types
 ALTER TABLE lineitem_alter ALTER COLUMN l_orderkey SET STATISTICS 100;
 ERROR:  alter table command is currently unsupported
-DETAIL:  Only ADD|DROP COLUMN, SET|DROP NOT NULL, SET|DROP DEFAULT, ADD|DROP CONSTRAINT, ATTACH|DETACH PARTITION and TYPE subcommands are supported.
+DETAIL:  Only ADD|DROP COLUMN, SET|DROP NOT NULL, SET|DROP DEFAULT, ADD|DROP CONSTRAINT and TYPE subcommands are supported.
 ALTER TABLE lineitem_alter DROP CONSTRAINT IF EXISTS non_existent_contraint;
 NOTICE:  constraint "non_existent_contraint" of relation "lineitem_alter" does not exist, skipping
 ALTER TABLE lineitem_alter SET WITHOUT OIDS;
 ERROR:  alter table command is currently unsupported
-DETAIL:  Only ADD|DROP COLUMN, SET|DROP NOT NULL, SET|DROP DEFAULT, ADD|DROP CONSTRAINT, ATTACH|DETACH PARTITION and TYPE subcommands are supported.
+DETAIL:  Only ADD|DROP COLUMN, SET|DROP NOT NULL, SET|DROP DEFAULT, ADD|DROP CONSTRAINT and TYPE subcommands are supported.
 -- Verify that we error out in case of postgres errors on supported statement
 -- types
 ALTER TABLE lineitem_alter ADD COLUMN new_column non_existent_type;
@@ -395,7 +395,8 @@ ALTER TABLE IF EXISTS non_existent_table RENAME COLUMN column1 TO column2;
 NOTICE:  relation "non_existent_table" does not exist, skipping
 -- Verify that none of the failed alter table commands took effect on the master
 -- node
-SELECT "Column", "Type", "Modifiers" FROM table_desc WHERE relid='public.lineitem_alter'::regclass;
+\d lineitem_alter
+            Table "public.lineitem_alter"
      Column      |         Type          | Modifiers 
 -----------------+-----------------------+-----------
  l_orderkey      | bigint                | not null
@@ -415,7 +416,6 @@ SELECT "Column", "Type", "Modifiers" FROM table_desc WHERE relid='public.lineite
  l_shipmode      | character(10)         | not null
  l_comment       | character varying(44) | not null
  null_column     | integer               | 
-(17 rows)
 
 -- verify that non-propagated ddl commands are allowed inside a transaction block
 SET citus.enable_ddl_propagation to false;
@@ -446,7 +446,8 @@ BEGIN;
 CREATE INDEX temp_index_2 ON lineitem_alter(l_orderkey);
 ALTER TABLE lineitem_alter ADD COLUMN first integer;
 COMMIT;
-SELECT "Column", "Type", "Modifiers" FROM table_desc WHERE relid='public.lineitem_alter'::regclass;
+\d lineitem_alter
+            Table "public.lineitem_alter"
      Column      |         Type          | Modifiers 
 -----------------+-----------------------+-----------
  l_orderkey      | bigint                | not null
@@ -467,14 +468,8 @@ SELECT "Column", "Type", "Modifiers" FROM table_desc WHERE relid='public.lineite
  l_comment       | character varying(44) | not null
  null_column     | integer               | 
  first           | integer               | 
-(18 rows)
-
-\d temp_index_2
-   Index "public.temp_index_2"
-   Column   |  Type  | Definition 
-------------+--------+------------
- l_orderkey | bigint | l_orderkey
-btree, for table "public.lineitem_alter"
+Indexes:
+    "temp_index_2" btree (l_orderkey)
 
 ALTER TABLE lineitem_alter DROP COLUMN first;
 DROP INDEX temp_index_2;
@@ -758,9 +753,11 @@ ALTER TABLE lineitem_alter ALTER COLUMN l_orderkey SET STATISTICS 100;
 ALTER TABLE lineitem_alter DROP CONSTRAINT IF EXISTS non_existent_contraint;
 NOTICE:  constraint "non_existent_contraint" of relation "lineitem_alter" does not exist, skipping
 ALTER TABLE lineitem_alter SET WITHOUT OIDS;
--- distribution column still cannot be dropped.
+-- even distribution column can be dropped however postgresql prevents this.
 ALTER TABLE lineitem_alter DROP COLUMN l_orderkey;
-ERROR:  cannot execute ALTER TABLE command dropping partition column
+ERROR:  cannot drop table lineitem_alter column l_orderkey because other objects depend on it
+DETAIL:  table lineitem_alter depends on table lineitem_alter column l_orderkey
+HINT:  Use DROP ... CASCADE to drop the dependent objects too.
 -- Even unique indexes on l_partkey (non-partition column) are allowed.
 -- Citus would have prevented that.
 CREATE UNIQUE INDEX unique_lineitem_partkey on lineitem_alter(l_partkey);
@@ -874,27 +871,5 @@ SELECT relname FROM pg_class WHERE relname LIKE 'lineitem_alter%';
 -----------------------
  lineitem_alter_220009
 (1 row)
-
-\c - - - :master_port
--- Test alter table with drop table in the same transaction
-BEGIN;
-CREATE TABLE test_table_1(id int);
-SELECT create_distributed_table('test_table_1','id');
- create_distributed_table 
---------------------------
- 
-(1 row)
-
-ALTER TABLE test_table_1 ADD CONSTRAINT u_key UNIQUE(id);
-NOTICE:  using one-phase commit for distributed DDL commands
-HINT:  You can enable two-phase commit for extra safety with: SET citus.multi_shard_commit_protocol TO '2pc'
-DROP TABLE test_table_1;
-END;
--- There should be no test_table_1 shard on workers
-\c - - - :worker_1_port
-SELECT relname FROM pg_class WHERE relname LIKE 'test_table_1%';
- relname 
----------
-(0 rows)
 
 \c - - - :master_port

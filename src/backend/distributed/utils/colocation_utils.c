@@ -20,7 +20,6 @@
 #include "commands/sequence.h"
 #include "distributed/colocation_utils.h"
 #include "distributed/listutils.h"
-#include "distributed/master_metadata_utility.h"
 #include "distributed/master_protocol.h"
 #include "distributed/metadata_cache.h"
 #include "distributed/metadata_sync.h"
@@ -127,7 +126,7 @@ MarkTablesColocated(Oid sourceRelationId, Oid targetRelationId)
 		uint32 shardCount = ShardIntervalCount(sourceRelationId);
 		uint32 shardReplicationFactor = TableShardReplicationFactor(sourceRelationId);
 
-		Var *sourceDistributionColumn = DistPartitionKey(sourceRelationId);
+		Var *sourceDistributionColumn = PartitionKey(sourceRelationId);
 		Oid sourceDistributionColumnType = InvalidOid;
 
 		/* reference tables has NULL distribution column */
@@ -478,7 +477,8 @@ CreateColocationGroup(int shardCount, int replicationFactor, Oid distributionCol
 	tupleDescriptor = RelationGetDescr(pgDistColocation);
 	heapTuple = heap_form_tuple(tupleDescriptor, values, isNulls);
 
-	CatalogTupleInsert(pgDistColocation, heapTuple);
+	simple_heap_insert(pgDistColocation, heapTuple);
+	CatalogUpdateIndexes(pgDistColocation, heapTuple);
 
 	/* increment the counter so that next command can see the row */
 	CommandCounterIncrement();
@@ -567,7 +567,7 @@ CheckDistributionColumnType(Oid sourceRelationId, Oid targetRelationId)
 	Oid targetDistributionColumnType = InvalidOid;
 
 	/* reference tables have NULL distribution column */
-	sourceDistributionColumn = DistPartitionKey(sourceRelationId);
+	sourceDistributionColumn = PartitionKey(sourceRelationId);
 	if (sourceDistributionColumn == NULL)
 	{
 		sourceDistributionColumnType = InvalidOid;
@@ -578,7 +578,7 @@ CheckDistributionColumnType(Oid sourceRelationId, Oid targetRelationId)
 	}
 
 	/* reference tables have NULL distribution column */
-	targetDistributionColumn = DistPartitionKey(targetRelationId);
+	targetDistributionColumn = PartitionKey(targetRelationId);
 	if (targetDistributionColumn == NULL)
 	{
 		targetDistributionColumnType = InvalidOid;
@@ -648,10 +648,9 @@ UpdateRelationColocationGroup(Oid distributedRelationId, uint32 colocationId)
 	replace[Anum_pg_dist_partition_colocationid - 1] = true;
 
 	heapTuple = heap_modify_tuple(heapTuple, tupleDescriptor, values, isNull, replace);
+	simple_heap_update(pgDistPartition, &heapTuple->t_self, heapTuple);
 
-
-	CatalogTupleUpdate(pgDistPartition, &heapTuple->t_self, heapTuple);
-
+	CatalogUpdateIndexes(pgDistPartition, heapTuple);
 	CitusInvalidateRelcacheByRelid(distributedRelationId);
 
 	CommandCounterIncrement();
@@ -903,15 +902,6 @@ ColocatedTableId(Oid colocationId)
 	bool isNull = false;
 	ScanKeyData scanKey[1];
 	int scanKeyCount = 1;
-
-	/*
-	 * We may have a distributed table whose colocation id is INVALID_COLOCATION_ID.
-	 * In this case, we do not want to send that table's id as colocated table id.
-	 */
-	if (colocationId == INVALID_COLOCATION_ID)
-	{
-		return colocatedTableId;
-	}
 
 	ScanKeyInit(&scanKey[0], Anum_pg_dist_partition_colocationid,
 				BTEqualStrategyNumber, F_INT4EQ, ObjectIdGetDatum(colocationId));

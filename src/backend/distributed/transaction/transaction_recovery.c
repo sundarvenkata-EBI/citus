@@ -100,12 +100,12 @@ LogTransactionRecord(int groupId, char *transactionName)
 	tupleDescriptor = RelationGetDescr(pgDistTransaction);
 	heapTuple = heap_form_tuple(tupleDescriptor, values, isNulls);
 
-	CatalogTupleInsert(pgDistTransaction, heapTuple);
-
+	simple_heap_insert(pgDistTransaction, heapTuple);
+	CatalogUpdateIndexes(pgDistTransaction, heapTuple);
 	CommandCounterIncrement();
 
 	/* close relation and invalidate previous cache entry */
-	heap_close(pgDistTransaction, NoLock);
+	heap_close(pgDistTransaction, RowExclusiveLock);
 }
 
 
@@ -127,7 +127,7 @@ RecoverPreparedTransactions(void)
 	 */
 	LockRelationOid(DistTransactionRelationId(), ExclusiveLock);
 
-	workerList = ActivePrimaryNodeList();
+	workerList = ActiveWorkerNodeList();
 
 	foreach(workerNodeCell, workerList)
 	{

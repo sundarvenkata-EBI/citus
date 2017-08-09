@@ -27,6 +27,18 @@ extern void ExtractRangeTblExtraData(RangeTblEntry *rte, CitusRTEKind *rteKind,
 									 List **tableIdList);
 extern CitusRTEKind GetRangeTblKind(RangeTblEntry *rte);
 
+/* citus_outfuncs.c */
+extern char * CitusNodeToString(const void *obj);
+
+/* citus_read.c */
+extern void * CitusStringToNode(char *str);
+extern char * citus_pg_strtok(int *length);
+extern void * CitusNodeRead(char *token, int tok_len);
+
+/* citus_readfuncs.c */
+extern Node * CitusParseNodeString(void);
+extern Datum readDatum(bool typbyval);
+
 extern void RegisterNodes(void);
 
 /*
@@ -35,12 +47,19 @@ extern void RegisterNodes(void);
  * different from before.
  */
 
+#if (PG_VERSION_NUM >= 90600)
 #define READFUNC_ARGS struct ExtensibleNode *node
 #define READFUNC_RET void
+#else
+#define READFUNC_ARGS void
+#define READFUNC_RET Node *
+#endif
 
+#if (PG_VERSION_NUM >= 90600)
 #define OUTFUNC_ARGS StringInfo str, const struct ExtensibleNode *raw_node
-#define COPYFUNC_ARGS struct ExtensibleNode *target_node, const struct \
-	ExtensibleNode *source_node
+#else
+#define OUTFUNC_ARGS StringInfo str, const Node *raw_node
+#endif
 
 extern READFUNC_RET ReadJob(READFUNC_ARGS);
 extern READFUNC_RET ReadMultiPlan(READFUNC_ARGS);
@@ -49,9 +68,7 @@ extern READFUNC_RET ReadMapMergeJob(READFUNC_ARGS);
 extern READFUNC_RET ReadShardPlacement(READFUNC_ARGS);
 extern READFUNC_RET ReadRelationShard(READFUNC_ARGS);
 extern READFUNC_RET ReadTask(READFUNC_ARGS);
-extern READFUNC_RET ReadTaskExecution(READFUNC_ARGS);
 extern READFUNC_RET ReadDeferredErrorMessage(READFUNC_ARGS);
-extern READFUNC_RET ReadGroupShardPlacement(READFUNC_ARGS);
 
 extern READFUNC_RET ReadUnsupportedCitusNode(READFUNC_ARGS);
 
@@ -62,9 +79,7 @@ extern void OutMapMergeJob(OUTFUNC_ARGS);
 extern void OutShardPlacement(OUTFUNC_ARGS);
 extern void OutRelationShard(OUTFUNC_ARGS);
 extern void OutTask(OUTFUNC_ARGS);
-extern void OutTaskExecution(OUTFUNC_ARGS);
 extern void OutDeferredErrorMessage(OUTFUNC_ARGS);
-extern void OutGroupShardPlacement(OUTFUNC_ARGS);
 
 extern void OutMultiNode(OUTFUNC_ARGS);
 extern void OutMultiTreeRoot(OUTFUNC_ARGS);
@@ -76,16 +91,5 @@ extern void OutMultiJoin(OUTFUNC_ARGS);
 extern void OutMultiPartition(OUTFUNC_ARGS);
 extern void OutMultiCartesianProduct(OUTFUNC_ARGS);
 extern void OutMultiExtendedOp(OUTFUNC_ARGS);
-
-extern void CopyNodeJob(COPYFUNC_ARGS);
-extern void CopyNodeMultiPlan(COPYFUNC_ARGS);
-extern void CopyNodeShardInterval(COPYFUNC_ARGS);
-extern void CopyNodeMapMergeJob(COPYFUNC_ARGS);
-extern void CopyNodeShardPlacement(COPYFUNC_ARGS);
-extern void CopyNodeGroupShardPlacement(COPYFUNC_ARGS);
-extern void CopyNodeRelationShard(COPYFUNC_ARGS);
-extern void CopyNodeTask(COPYFUNC_ARGS);
-extern void CopyNodeTaskExecution(COPYFUNC_ARGS);
-extern void CopyNodeDeferredErrorMessage(COPYFUNC_ARGS);
 
 #endif /* CITUS_NODEFUNCS_H */

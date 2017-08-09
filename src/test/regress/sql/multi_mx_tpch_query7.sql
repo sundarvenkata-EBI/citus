@@ -3,6 +3,8 @@
 --
 
 
+ALTER SEQUENCE pg_catalog.pg_dist_shardid_seq RESTART 1230000;
+
 -- connect to the coordinator
 \c - - - :master_port
 
@@ -55,6 +57,8 @@ ORDER BY
 -- connect one of the workers
 \c - - - :worker_1_port
 
+ALTER SEQUENCE pg_catalog.pg_dist_shardid_seq RESTART 1230000;
+
 -- Change configuration to treat lineitem AND orders tables as large
 
 SET citus.large_table_shard_count TO 2;
@@ -103,6 +107,8 @@ ORDER BY
 
 -- connect to the other worker node
 \c - - - :worker_2_port
+
+ALTER SEQUENCE pg_catalog.pg_dist_shardid_seq RESTART 1230000;
 
 -- Change configuration to treat lineitem AND orders tables as large
 

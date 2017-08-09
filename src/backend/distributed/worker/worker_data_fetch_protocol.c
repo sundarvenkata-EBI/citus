@@ -14,7 +14,6 @@
 
 #include "postgres.h"
 #include "funcapi.h"
-#include "libpq-fe.h"
 #include "miscadmin.h"
 #include <unistd.h>
 #include <sys/stat.h>
@@ -27,15 +26,12 @@
 #include "commands/extension.h"
 #include "commands/sequence.h"
 #include "distributed/citus_ruleutils.h"
-#include "distributed/connection_management.h"
 #include "distributed/master_protocol.h"
 #include "distributed/metadata_cache.h"
 #include "distributed/multi_client_executor.h"
 #include "distributed/multi_logical_optimizer.h"
 #include "distributed/multi_server_executor.h"
-#include "distributed/multi_utility.h"
 #include "distributed/relay_utility.h"
-#include "distributed/remote_commands.h"
 #include "distributed/resource_lock.h"
 #include "distributed/task_tracker.h"
 #include "distributed/worker_protocol.h"
@@ -45,10 +41,6 @@
 #include "tcop/utility.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
-#if (PG_VERSION_NUM >= 100000)
-#include "utils/regproc.h"
-#include "utils/varlena.h"
-#endif
 
 
 /* Config variable managed via guc.c */
@@ -433,8 +425,8 @@ worker_apply_shard_ddl_command(PG_FUNCTION_ARGS)
 
 	/* extend names in ddl command and apply extended command */
 	RelayEventExtendNames(ddlCommandNode, schemaName, shardId);
-	CitusProcessUtility(ddlCommandNode, ddlCommand, PROCESS_UTILITY_TOPLEVEL, NULL,
-						None_Receiver, NULL);
+	ProcessUtility(ddlCommandNode, ddlCommand, PROCESS_UTILITY_TOPLEVEL,
+				   NULL, None_Receiver, NULL);
 
 	PG_RETURN_VOID();
 }
@@ -465,8 +457,8 @@ worker_apply_inter_shard_ddl_command(PG_FUNCTION_ARGS)
 	RelayEventExtendNamesForInterShardCommands(ddlCommandNode, leftShardId,
 											   leftShardSchemaName, rightShardId,
 											   rightShardSchemaName);
-	CitusProcessUtility(ddlCommandNode, ddlCommand, PROCESS_UTILITY_TOPLEVEL, NULL,
-						None_Receiver, NULL);
+	ProcessUtility(ddlCommandNode, ddlCommand, PROCESS_UTILITY_TOPLEVEL, NULL,
+				   None_Receiver, NULL);
 
 	PG_RETURN_VOID();
 }
@@ -501,9 +493,8 @@ worker_apply_sequence_command(PG_FUNCTION_ARGS)
 	}
 
 	/* run the CREATE SEQUENCE command */
-	CitusProcessUtility(commandNode, commandString, PROCESS_UTILITY_TOPLEVEL, NULL,
-						None_Receiver, NULL);
-	CommandCounterIncrement();
+	ProcessUtility(commandNode, commandString, PROCESS_UTILITY_TOPLEVEL,
+				   NULL, None_Receiver, NULL);
 
 	createSequenceStatement = (CreateSeqStmt *) commandNode;
 
@@ -690,7 +681,7 @@ LocalTableSize(Oid relationId)
 	Datum relationIdDatum = ObjectIdGetDatum(relationId);
 
 	relationType = get_rel_relkind(relationId);
-	if (RegularTable(relationId))
+	if (relationType == RELKIND_RELATION)
 	{
 		Datum tableSizeDatum = DirectFunctionCall1(pg_table_size, relationIdDatum);
 
@@ -856,8 +847,8 @@ FetchRegularTable(const char *nodeName, uint32 nodePort, const char *tableName)
 		StringInfo ddlCommand = (StringInfo) lfirst(ddlCommandCell);
 		Node *ddlCommandNode = ParseTreeNode(ddlCommand->data);
 
-		CitusProcessUtility(ddlCommandNode, ddlCommand->data, PROCESS_UTILITY_TOPLEVEL,
-							NULL, None_Receiver, NULL);
+		ProcessUtility(ddlCommandNode, ddlCommand->data, PROCESS_UTILITY_TOPLEVEL,
+					   NULL, None_Receiver, NULL);
 		CommandCounterIncrement();
 	}
 
@@ -875,8 +866,8 @@ FetchRegularTable(const char *nodeName, uint32 nodePort, const char *tableName)
 	queryString = makeStringInfo();
 	appendStringInfo(queryString, COPY_IN_COMMAND, tableName, localFilePath->data);
 
-	CitusProcessUtility((Node *) localCopyCommand, queryString->data,
-						PROCESS_UTILITY_TOPLEVEL, NULL, None_Receiver, NULL);
+	ProcessUtility((Node *) localCopyCommand, queryString->data,
+				   PROCESS_UTILITY_TOPLEVEL, NULL, None_Receiver, NULL);
 
 	/* finally delete the temporary file we created */
 	DeleteFile(localFilePath->data);
@@ -950,8 +941,8 @@ FetchForeignTable(const char *nodeName, uint32 nodePort, const char *tableName)
 		StringInfo ddlCommand = (StringInfo) lfirst(ddlCommandCell);
 		Node *ddlCommandNode = ParseTreeNode(ddlCommand->data);
 
-		CitusProcessUtility(ddlCommandNode, ddlCommand->data, PROCESS_UTILITY_TOPLEVEL,
-							NULL, None_Receiver, NULL);
+		ProcessUtility(ddlCommandNode, ddlCommand->data, PROCESS_UTILITY_TOPLEVEL,
+					   NULL, None_Receiver, NULL);
 		CommandCounterIncrement();
 	}
 
@@ -969,17 +960,11 @@ RemoteTableOwner(const char *nodeName, uint32 nodePort, const char *tableName)
 	List *ownerList = NIL;
 	StringInfo queryString = NULL;
 	StringInfo relationOwner;
-	MultiConnection *connection = NULL;
-	uint32 connectionFlag = FORCE_NEW_CONNECTION;
-	PGresult *result = NULL;
 
 	queryString = makeStringInfo();
 	appendStringInfo(queryString, GET_TABLE_OWNER, tableName);
-	connection = GetNodeConnection(connectionFlag, nodeName, nodePort);
 
-	ExecuteOptionalRemoteCommand(connection, queryString->data, &result);
-
-	ownerList = ReadFirstColumnAsText(result);
+	ownerList = ExecuteRemoteQuery(nodeName, nodePort, NULL, queryString);
 	if (list_length(ownerList) != 1)
 	{
 		return NULL;
@@ -1001,20 +986,11 @@ TableDDLCommandList(const char *nodeName, uint32 nodePort, const char *tableName
 {
 	List *ddlCommandList = NIL;
 	StringInfo queryString = NULL;
-	MultiConnection *connection = NULL;
-	PGresult *result = NULL;
-	uint32 connectionFlag = FORCE_NEW_CONNECTION;
 
 	queryString = makeStringInfo();
 	appendStringInfo(queryString, GET_TABLE_DDL_EVENTS, tableName);
-	connection = GetNodeConnection(connectionFlag, nodeName, nodePort);
 
-	ExecuteOptionalRemoteCommand(connection, queryString->data, &result);
-	ddlCommandList = ReadFirstColumnAsText(result);
-
-	ForgetResults(connection);
-	CloseConnection(connection);
-
+	ddlCommandList = ExecuteRemoteQuery(nodeName, nodePort, NULL, queryString);
 	return ddlCommandList;
 }
 
@@ -1030,17 +1006,11 @@ ForeignFilePath(const char *nodeName, uint32 nodePort, const char *tableName)
 	List *foreignPathList = NIL;
 	StringInfo foreignPathCommand = NULL;
 	StringInfo foreignPath = NULL;
-	MultiConnection *connection = NULL;
-	PGresult *result = NULL;
-	int connectionFlag = FORCE_NEW_CONNECTION;
 
 	foreignPathCommand = makeStringInfo();
 	appendStringInfo(foreignPathCommand, FOREIGN_FILE_PATH_COMMAND, tableName);
-	connection = GetNodeConnection(connectionFlag, nodeName, nodePort);
 
-	ExecuteOptionalRemoteCommand(connection, foreignPathCommand->data, &result);
-
-	foreignPathList = ReadFirstColumnAsText(result);
+	foreignPathList = ExecuteRemoteQuery(nodeName, nodePort, NULL, foreignPathCommand);
 	if (foreignPathList != NIL)
 	{
 		foreignPath = (StringInfo) linitial(foreignPathList);
@@ -1131,18 +1101,61 @@ ExecuteRemoteQuery(const char *nodeName, uint32 nodePort, char *runAsUser,
 
 
 /*
- * Parses the given DDL command, and returns the tree node for parsed command.
+ * ExecuteRemoteCommand executes the given SQL command. This command could be an
+ * Insert, Update, or Delete statement, or a utility command that returns
+ * nothing. If query is successfuly executed, the function returns true.
+ * Otherwise, it returns false.
  */
-Node *
-ParseTreeNode(const char *ddlCommand)
+bool
+ExecuteRemoteCommand(const char *nodeName, uint32 nodePort, StringInfo queryString)
 {
-	Node *parseTreeNode = ParseTreeRawStmt(ddlCommand);
+	char *nodeDatabase = get_database_name(MyDatabaseId);
+	int32 connectionId = -1;
+	QueryStatus queryStatus = CLIENT_INVALID_QUERY;
+	bool querySent = false;
+	bool queryReady = false;
+	bool queryDone = false;
 
-#if (PG_VERSION_NUM >= 100000)
-	parseTreeNode = ((RawStmt *) parseTreeNode)->stmt;
-#endif
+	connectionId = MultiClientConnect(nodeName, nodePort, nodeDatabase, NULL);
+	if (connectionId == INVALID_CONNECTION_ID)
+	{
+		return false;
+	}
 
-	return parseTreeNode;
+	querySent = MultiClientSendQuery(connectionId, queryString->data);
+	if (!querySent)
+	{
+		MultiClientDisconnect(connectionId);
+		return false;
+	}
+
+	while (!queryReady)
+	{
+		ResultStatus resultStatus = MultiClientResultStatus(connectionId);
+		if (resultStatus == CLIENT_RESULT_READY)
+		{
+			queryReady = true;
+		}
+		else if (resultStatus == CLIENT_RESULT_BUSY)
+		{
+			long sleepIntervalPerCycle = RemoteTaskCheckInterval * 1000L;
+			pg_usleep(sleepIntervalPerCycle);
+		}
+		else
+		{
+			MultiClientDisconnect(connectionId);
+			return false;
+		}
+	}
+
+	queryStatus = MultiClientQueryStatus(connectionId);
+	if (queryStatus == CLIENT_QUERY_DONE)
+	{
+		queryDone = true;
+	}
+
+	MultiClientDisconnect(connectionId);
+	return queryDone;
 }
 
 
@@ -1150,7 +1163,7 @@ ParseTreeNode(const char *ddlCommand)
  * Parses the given DDL command, and returns the tree node for parsed command.
  */
 Node *
-ParseTreeRawStmt(const char *ddlCommand)
+ParseTreeNode(const char *ddlCommand)
 {
 	Node *parseTreeNode = NULL;
 	List *parseTreeList = NULL;
@@ -1258,8 +1271,8 @@ worker_append_table_to_shard(PG_FUNCTION_ARGS)
 	appendStringInfo(queryString, COPY_IN_COMMAND, shardQualifiedName,
 					 localFilePath->data);
 
-	CitusProcessUtility((Node *) localCopyCommand, queryString->data,
-						PROCESS_UTILITY_TOPLEVEL, NULL, None_Receiver, NULL);
+	ProcessUtility((Node *) localCopyCommand, queryString->data,
+				   PROCESS_UTILITY_TOPLEVEL, NULL, None_Receiver, NULL);
 
 	/* finally delete the temporary file we created */
 	DeleteFile(localFilePath->data);
@@ -1320,14 +1333,6 @@ AlterSequenceMinMax(Oid sequenceId, char *schemaName, char *sequenceName)
 	Form_pg_sequence sequenceData = pg_get_sequencedef(sequenceId);
 	int64 startValue = 0;
 	int64 maxValue = 0;
-#if (PG_VERSION_NUM >= 100000)
-	int64 sequenceMaxValue = sequenceData->seqmax;
-	int64 sequenceMinValue = sequenceData->seqmin;
-#else
-	int64 sequenceMaxValue = sequenceData->max_value;
-	int64 sequenceMinValue = sequenceData->min_value;
-#endif
-
 
 	/* calculate min/max values that the sequence can generate in this worker */
 	startValue = (((int64) GetLocalGroupId()) << 48) + 1;
@@ -1338,7 +1343,7 @@ AlterSequenceMinMax(Oid sequenceId, char *schemaName, char *sequenceName)
 	 * their correct values. This happens when the sequence has been created
 	 * during shard, before the current worker having the metadata.
 	 */
-	if (sequenceMinValue != startValue || sequenceMaxValue != maxValue)
+	if (sequenceData->min_value != startValue || sequenceData->max_value != maxValue)
 	{
 		StringInfo startNumericString = makeStringInfo();
 		StringInfo maxNumericString = makeStringInfo();
@@ -1366,8 +1371,8 @@ AlterSequenceMinMax(Oid sequenceId, char *schemaName, char *sequenceName)
 		SetDefElemArg(alterSequenceStatement, "restart", startFloatArg);
 
 		/* since the command is an AlterSeqStmt, a dummy command string works fine */
-		CitusProcessUtility((Node *) alterSequenceStatement, dummyString,
-							PROCESS_UTILITY_TOPLEVEL, NULL, None_Receiver, NULL);
+		ProcessUtility((Node *) alterSequenceStatement, dummyString,
+					   PROCESS_UTILITY_TOPLEVEL, NULL, None_Receiver, NULL);
 	}
 }
 
@@ -1397,11 +1402,6 @@ SetDefElemArg(AlterSeqStmt *statement, const char *name, Node *arg)
 		}
 	}
 
-#if (PG_VERSION_NUM >= 100000)
-	defElem = makeDefElem((char *) name, arg, -1);
-#else
 	defElem = makeDefElem((char *) name, arg);
-#endif
-
 	statement->options = lappend(statement->options, defElem);
 }

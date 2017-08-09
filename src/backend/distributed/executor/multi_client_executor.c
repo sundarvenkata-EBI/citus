@@ -27,9 +27,14 @@
 #include <errno.h>
 #include <unistd.h>
 
+#ifdef HAVE_POLL_H
 #include <poll.h>
+#endif
 #ifdef HAVE_SYS_POLL_H
 #include <sys/poll.h>
+#endif
+#ifdef HAVE_SYS_SELECT_H
+#include <sys/select.h>
 #endif
 
 
@@ -44,6 +49,7 @@ static PostgresPollingStatusType ClientPollingStatusArray[MAX_CONNECTION_COUNT];
 
 
 /* Local functions forward declarations */
+static void ClearRemainingResults(MultiConnection *connection);
 static bool ClientConnectionReady(MultiConnection *connection,
 								  PostgresPollingStatusType pollingStatus);
 
@@ -400,7 +406,6 @@ MultiClientQueryResult(int32 connectionId, void **queryResult, int *rowCount,
 	PGresult *result = NULL;
 	ConnStatusType connStatusType = CONNECTION_OK;
 	ExecStatusType resultStatus = PGRES_COMMAND_OK;
-	bool raiseInterrupts = true;
 
 	Assert(connectionId != INVALID_CONNECTION_ID);
 	connection = ClientConnectionArray[connectionId];
@@ -413,7 +418,7 @@ MultiClientQueryResult(int32 connectionId, void **queryResult, int *rowCount,
 		return false;
 	}
 
-	result = GetRemoteCommandResult(connection, raiseInterrupts);
+	result = PQgetResult(connection->pgConn);
 	resultStatus = PQresultStatus(result);
 	if (resultStatus == PGRES_TUPLES_OK)
 	{
@@ -430,7 +435,7 @@ MultiClientQueryResult(int32 connectionId, void **queryResult, int *rowCount,
 	}
 
 	/* clear extra result objects */
-	ForgetResults(connection);
+	ClearRemainingResults(connection);
 
 	return true;
 }
@@ -454,7 +459,6 @@ MultiClientBatchResult(int32 connectionId, void **queryResult, int *rowCount,
 	ConnStatusType connStatusType = CONNECTION_OK;
 	ExecStatusType resultStatus = PGRES_COMMAND_OK;
 	BatchQueryStatus queryStatus = CLIENT_INVALID_BATCH_QUERY;
-	bool raiseInterrupts = true;
 
 	Assert(connectionId != INVALID_CONNECTION_ID);
 	connection = ClientConnectionArray[connectionId];
@@ -472,7 +476,7 @@ MultiClientBatchResult(int32 connectionId, void **queryResult, int *rowCount,
 		return CLIENT_BATCH_QUERY_FAILED;
 	}
 
-	result = GetRemoteCommandResult(connection, raiseInterrupts);
+	result = PQgetResult(connection->pgConn);
 	if (result == NULL)
 	{
 		return CLIENT_BATCH_QUERY_DONE;
@@ -539,7 +543,6 @@ MultiClientQueryStatus(int32 connectionId)
 	ConnStatusType connStatusType = CONNECTION_OK;
 	ExecStatusType resultStatus = PGRES_COMMAND_OK;
 	QueryStatus queryStatus = CLIENT_INVALID_QUERY;
-	bool raiseInterrupts = true;
 
 	Assert(connectionId != INVALID_CONNECTION_ID);
 	connection = ClientConnectionArray[connectionId];
@@ -557,7 +560,7 @@ MultiClientQueryStatus(int32 connectionId)
 	 * isn't ready yet (the caller didn't wait for the connection to be ready),
 	 * we will block on this call.
 	 */
-	result = GetRemoteCommandResult(connection, raiseInterrupts);
+	result = PQgetResult(connection->pgConn);
 	resultStatus = PQresultStatus(result);
 
 	if (resultStatus == PGRES_COMMAND_OK)
@@ -600,7 +603,7 @@ MultiClientQueryStatus(int32 connectionId)
 	 */
 	if (!copyResults)
 	{
-		ForgetResults(connection);
+		ClearRemainingResults(connection);
 	}
 
 	return queryStatus;
@@ -667,8 +670,7 @@ MultiClientCopyData(int32 connectionId, int32 fileDescriptor)
 	else if (receiveLength == -1)
 	{
 		/* received copy done message */
-		bool raiseInterrupts = true;
-		PGresult *result = GetRemoteCommandResult(connection, raiseInterrupts);
+		PGresult *result = PQgetResult(connection->pgConn);
 		ExecStatusType resultStatus = PQresultStatus(result);
 
 		if (resultStatus == PGRES_COMMAND_OK)
@@ -695,7 +697,7 @@ MultiClientCopyData(int32 connectionId, int32 fileDescriptor)
 	/* if copy out completed, make sure we drain all results from libpq */
 	if (receiveLength < 0)
 	{
-		ForgetResults(connection);
+		ClearRemainingResults(connection);
 	}
 
 	return copyStatus;
@@ -857,6 +859,23 @@ MultiClientWait(WaitInfo *waitInfo)
 
 
 /*
+ * ClearRemainingResults reads result objects from the connection until we get
+ * null, and clears these results. This is the last step in completing an async
+ * query.
+ */
+static void
+ClearRemainingResults(MultiConnection *connection)
+{
+	PGresult *result = PQgetResult(connection->pgConn);
+	while (result != NULL)
+	{
+		PQclear(result);
+		result = PQgetResult(connection->pgConn);
+	}
+}
+
+
+/*
  * ClientConnectionReady checks if the given connection is ready for non-blocking
  * reads or writes. This function is loosely based on pqSocketCheck() at fe-misc.c
  * and libpq_select() at libpqwalreceiver.c.
@@ -867,6 +886,9 @@ ClientConnectionReady(MultiConnection *connection,
 {
 	bool clientConnectionReady = false;
 	int pollResult = 0;
+
+	/* we use poll(2) if available, otherwise select(2) */
+#ifdef HAVE_POLL
 	int fileDescriptorCount = 1;
 	int immediateTimeout = 0;
 	int pollEventMask = 0;
@@ -886,6 +908,33 @@ ClientConnectionReady(MultiConnection *connection,
 	pollFileDescriptor.revents = 0;
 
 	pollResult = poll(&pollFileDescriptor, fileDescriptorCount, immediateTimeout);
+#else /* !HAVE_POLL */
+
+	fd_set readFileDescriptorSet;
+	fd_set writeFileDescriptorSet;
+	fd_set exceptionFileDescriptorSet;
+	struct timeval immediateTimeout = { 0, 0 };
+	int connectionFileDescriptor = PQsocket(connection);
+
+	FD_ZERO(&readFileDescriptorSet);
+	FD_ZERO(&writeFileDescriptorSet);
+	FD_ZERO(&exceptionFileDescriptorSet);
+
+	if (pollingStatus == PGRES_POLLING_READING)
+	{
+		FD_SET(connectionFileDescriptor, &exceptionFileDescriptorSet);
+		FD_SET(connectionFileDescriptor, &readFileDescriptorSet);
+	}
+	else if (pollingStatus == PGRES_POLLING_WRITING)
+	{
+		FD_SET(connectionFileDescriptor, &exceptionFileDescriptorSet);
+		FD_SET(connectionFileDescriptor, &writeFileDescriptorSet);
+	}
+
+	pollResult = select(connectionFileDescriptor + 1, &readFileDescriptorSet,
+						&writeFileDescriptorSet, &exceptionFileDescriptorSet,
+						&immediateTimeout);
+#endif /* HAVE_POLL */
 
 	if (pollResult > 0)
 	{
@@ -908,7 +957,7 @@ ClientConnectionReady(MultiConnection *connection,
 		else
 		{
 			/*
-			 * poll() can set errno to EFAULT (when socket is not
+			 * poll() or select() can set errno to EFAULT (when socket is not
 			 * contained in the calling program's address space), EBADF (invalid
 			 * file descriptor), EINVAL (invalid arguments to select or poll),
 			 * and ENOMEM (no space to allocate file descriptor tables). Out of
@@ -917,7 +966,7 @@ ClientConnectionReady(MultiConnection *connection,
 			 */
 			Assert(errno == ENOMEM);
 			ereport(ERROR, (errcode_for_socket_access(),
-							errmsg("poll() failed: %m")));
+							errmsg("select()/poll() failed: %m")));
 		}
 	}
 

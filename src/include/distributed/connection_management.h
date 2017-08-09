@@ -37,10 +37,7 @@ enum MultiConnectionMode
 
 	FOR_DDL = 1 << 2,
 
-	FOR_DML = 1 << 3,
-
-	/* open a connection per (co-located set of) placement(s) */
-	CONNECTION_PER_PLACEMENT = 1 << 4
+	FOR_DML = 1 << 3
 };
 
 
@@ -137,7 +134,6 @@ extern MultiConnection * GetConnectionFromPGconn(struct pg_conn *pqConn);
 extern void CloseNodeConnectionsAfterTransaction(char *nodeName, int nodePort);
 extern void CloseConnection(MultiConnection *connection);
 extern void CloseConnectionByPGconn(struct pg_conn *pqConn);
-extern void ShutdownConnection(MultiConnection *connection);
 
 /* dealing with a connection */
 extern void FinishConnectionListEstablishment(List *multiConnectionList);

@@ -84,9 +84,6 @@ typedef struct CitusCopyDestReceiver
 	/* state on how to copy out data types */
 	CopyOutState copyOutState;
 	FmgrInfo *columnOutputFunctions;
-
-	/* number of tuples sent */
-	int64 tuplesSent;
 } CitusCopyDestReceiver;
 
 

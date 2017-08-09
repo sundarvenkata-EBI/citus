@@ -34,7 +34,7 @@ extern char * NodeStateUpdateCommand(uint32 nodeId, bool isActive);
 extern char * ColocationIdUpdateCommand(Oid relationId, uint32 colocationId);
 extern char * CreateSchemaDDLCommand(Oid schemaId);
 extern char * PlacementUpsertCommand(uint64 shardId, uint64 placementId, int shardState,
-									 uint64 shardLength, uint32 groupId);
+									 uint64 shardLength, char *nodeName, uint32 nodePort);
 extern void CreateTableMetadataOnWorkers(Oid relationId);
 
 
@@ -43,15 +43,16 @@ extern void CreateTableMetadataOnWorkers(Oid relationId);
 	"SELECT worker_drop_distributed_table(logicalrelid) FROM pg_dist_partition"
 #define DISABLE_DDL_PROPAGATION "SET citus.enable_ddl_propagation TO 'off'"
 #define WORKER_APPLY_SEQUENCE_COMMAND "SELECT worker_apply_sequence_command (%s)"
-#define UPSERT_PLACEMENT "INSERT INTO pg_dist_placement " \
+#define UPSERT_PLACEMENT "INSERT INTO pg_dist_shard_placement " \
 						 "(shardid, shardstate, shardlength, " \
-						 "groupid, placementid) " \
-						 "VALUES (%lu, %d, %lu, %d, %lu) " \
+						 "nodename, nodeport, placementid) " \
+						 "VALUES (%lu, %d, %lu, %s, %d, %lu) " \
 						 "ON CONFLICT (placementid) DO UPDATE SET " \
 						 "shardid = EXCLUDED.shardid, " \
 						 "shardstate = EXCLUDED.shardstate, " \
 						 "shardlength = EXCLUDED.shardlength, " \
-						 "groupid = EXCLUDED.groupid"
+						 "nodename = EXCLUDED.nodename, " \
+						 "nodeport = EXCLUDED.nodeport"
 
 
 #endif /* METADATA_SYNC_H */

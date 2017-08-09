@@ -17,7 +17,7 @@
 #include "nodes/pg_list.h"
 
 
-/* Worker nodeName's, nodePort's, and nodeCluster's maximum length */
+/* Worker node name's maximum length */
 #define WORKER_LENGTH 256
 
 /* Maximum length of worker port number (represented as string) */
@@ -29,8 +29,6 @@
 /* Implementation specific definitions used in finding worker nodes */
 #define WORKER_RACK_TRIES 5
 #define WORKER_DEFAULT_RACK "default"
-
-#define WORKER_DEFAULT_CLUSTER "default"
 
 /*
  * In memory representation of pg_dist_node table elements. The elements are hold in
@@ -45,15 +43,12 @@ typedef struct WorkerNode
 	char workerRack[WORKER_LENGTH];     /* node's network location */
 	bool hasMetadata;                   /* node gets metadata changes */
 	bool isActive;                      /* node's state */
-	Oid nodeRole;                       /* the node's role in its group */
-	char nodeCluster[NAMEDATALEN];      /* the cluster the node is a part of */
 } WorkerNode;
 
 
 /* Config variables managed via guc.c */
 extern int MaxWorkerNodesTracked;
 extern char *WorkerListFileName;
-extern char *CurrentCluster;
 
 
 /* Function declarations for finding worker nodes to place shards on */
@@ -62,15 +57,12 @@ extern WorkerNode * WorkerGetRoundRobinCandidateNode(List *workerNodeList,
 													 uint64 shardId,
 													 uint32 placementIndex);
 extern WorkerNode * WorkerGetLocalFirstCandidateNode(List *currentNodeList);
-extern uint32 ActivePrimaryNodeCount(void);
-extern List * ActivePrimaryNodeList(void);
+extern WorkerNode * WorkerGetNodeWithName(const char *hostname);
+extern uint32 WorkerGetLiveNodeCount(void);
+extern List * ActiveWorkerNodeList(void);
 extern WorkerNode * FindWorkerNode(char *nodeName, int32 nodePort);
-extern WorkerNode * FindWorkerNodeAnyCluster(char *nodeName, int32 nodePort);
 extern List * ReadWorkerNodes(void);
 extern void EnsureCoordinator(void);
-extern uint32 GroupForNode(char *nodeName, int32 nodePorT);
-extern WorkerNode * PrimaryNodeForGroup(uint32 groupId, bool *groupContainsNodes);
-extern bool WorkerNodeIsPrimary(WorkerNode *worker);
 
 /* Function declarations for worker node utilities */
 extern int CompareWorkerNodes(const void *leftElement, const void *rightElement);

@@ -9,10 +9,6 @@
 
 ALTER SEQUENCE pg_catalog.pg_dist_shardid_seq RESTART 710000;
 
--- print major version to make version-specific tests clear
-SHOW server_version \gset
-SELECT substring(:'server_version', '\d+') AS major_version;
-
 
 BEGIN;
 SET client_min_messages TO DEBUG3;

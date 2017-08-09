@@ -19,11 +19,7 @@
 #include "distributed/metadata_cache.h"
 #include "distributed/multi_client_executor.h"
 #include "libpq/hba.h"
-#if (PG_VERSION_NUM >= 100000)
-#include "common/ip.h"
-#else
 #include "libpq/ip.h"
-#endif
 #include "libpq/libpq-be.h"
 #include "postmaster/postmaster.h"
 #include "storage/fd.h"
@@ -40,10 +36,9 @@ int MaxWorkerNodesTracked = 2048;    /* determines worker node hash table size *
 
 
 /* Local functions forward declarations */
-static WorkerNode * WorkerGetNodeWithName(const char *hostname);
 static char * ClientHostAddress(StringInfo remoteHostStringInfo);
-static List * PrimaryNodesNotInList(List *currentList);
-static WorkerNode * FindRandomNodeFromList(List *candidateWorkerNodeList);
+static WorkerNode * FindRandomNodeNotInList(HTAB *WorkerNodesHash,
+											List *currentNodeList);
 static bool OddNumber(uint32 number);
 static bool ListMember(List *currentList, WorkerNode *workerNode);
 
@@ -54,8 +49,9 @@ static bool ListMember(List *currentList, WorkerNode *workerNode);
  */
 
 /*
- * WorkerGetRandomCandidateNode accepts a list of WorkerNode's and returns a random
- * primary node which is not in that list.
+ * WorkerGetRandomCandidateNode takes in a list of worker nodes, and then allocates
+ * a new worker node. The allocation is performed by randomly picking a worker node
+ * which is not in currentNodeList.
  *
  * Note that the function returns null if the worker membership list does not
  * contain enough nodes to allocate a new worker node.
@@ -68,11 +64,16 @@ WorkerGetRandomCandidateNode(List *currentNodeList)
 	uint32 tryCount = WORKER_RACK_TRIES;
 	uint32 tryIndex = 0;
 
-	uint32 currentNodeCount = list_length(currentNodeList);
-	List *candidateWorkerNodeList = PrimaryNodesNotInList(currentNodeList);
+	HTAB *workerNodeHash = GetWorkerNodeHash();
 
-	/* we check if the shard has already been placed on all nodes known to us */
-	if (list_length(candidateWorkerNodeList) == 0)
+	/*
+	 * We check if the shard has already been placed on all nodes known to us.
+	 * This check is rather defensive, and has the drawback of performing a full
+	 * scan over the worker node hash for determining the number of live nodes.
+	 */
+	uint32 currentNodeCount = list_length(currentNodeList);
+	uint32 liveNodeCount = WorkerGetLiveNodeCount();
+	if (currentNodeCount >= liveNodeCount)
 	{
 		return NULL;
 	}
@@ -80,7 +81,7 @@ WorkerGetRandomCandidateNode(List *currentNodeList)
 	/* if current node list is empty, randomly pick one node and return */
 	if (currentNodeCount == 0)
 	{
-		workerNode = FindRandomNodeFromList(candidateWorkerNodeList);
+		workerNode = FindRandomNodeNotInList(workerNodeHash, NIL);
 		return workerNode;
 	}
 
@@ -110,7 +111,7 @@ WorkerGetRandomCandidateNode(List *currentNodeList)
 		char *workerRack = NULL;
 		bool sameRack = false;
 
-		workerNode = FindRandomNodeFromList(candidateWorkerNodeList);
+		workerNode = FindRandomNodeNotInList(workerNodeHash, currentNodeList);
 		workerRack = workerNode->workerRack;
 
 		sameRack = (strncmp(workerRack, firstRack, WORKER_LENGTH) == 0);
@@ -271,7 +272,7 @@ ClientHostAddress(StringInfo clientHostStringInfo)
  * WorkerGetNodeWithName finds and returns a node from the membership list that
  * has the given hostname. The function returns null if no such node exists.
  */
-static WorkerNode *
+WorkerNode *
 WorkerGetNodeWithName(const char *hostname)
 {
 	WorkerNode *workerNode = NULL;
@@ -296,12 +297,12 @@ WorkerGetNodeWithName(const char *hostname)
 
 
 /*
- * ActivePrimaryNodeCount returns the number of groups with a primary in the cluster.
- */
+ * WorkerGetLiveNodeCount returns the number of live nodes in the cluster.
+ * */
 uint32
-ActivePrimaryNodeCount(void)
+WorkerGetLiveNodeCount(void)
 {
-	List *workerNodeList = ActivePrimaryNodeList();
+	List *workerNodeList = ActiveWorkerNodeList();
 	uint32 liveWorkerCount = list_length(workerNodeList);
 
 	return liveWorkerCount;
@@ -309,21 +310,26 @@ ActivePrimaryNodeCount(void)
 
 
 /*
- * ActivePrimaryNodeList returns a list of all the active primary nodes in workerNodeHash
+ * ActiveWorkerNodeList iterates over the hash table that includes the worker
+ * nodes and adds active nodes to a list, which is returned.
  */
 List *
-ActivePrimaryNodeList(void)
+ActiveWorkerNodeList(void)
 {
 	List *workerNodeList = NIL;
 	WorkerNode *workerNode = NULL;
+	ereport(WARNING, (errmsg("Came to line 321 in worker_node_manager.c")));
 	HTAB *workerNodeHash = GetWorkerNodeHash();
+	ereport(WARNING, (errmsg("Came to line 323 in worker_node_manager.c")));
 	HASH_SEQ_STATUS status;
 
+	ereport(WARNING, (errmsg("Came to line 326 in worker_node_manager.c")));
 	hash_seq_init(&status, workerNodeHash);
+	ereport(WARNING, (errmsg("Came to line 328 in worker_node_manager.c")));
 
 	while ((workerNode = hash_seq_search(&status)) != NULL)
 	{
-		if (workerNode->isActive && WorkerNodeIsPrimary(workerNode))
+		if (workerNode->isActive)
 		{
 			WorkerNode *workerNodeCopy = palloc0(sizeof(WorkerNode));
 			memcpy(workerNodeCopy, workerNode, sizeof(WorkerNode));
@@ -336,48 +342,70 @@ ActivePrimaryNodeList(void)
 
 
 /*
- * PrimaryNodesNotInList scans through the worker node hash and returns a list of all
- * primary nodes which are not in currentList. It runs in O(n*m) but currentList is
- * quite small.
+ * FindRandomNodeNotInList finds a random node from the shared hash that is not
+ * a member of the current node list. The caller is responsible for making the
+ * necessary node count checks to ensure that such a node exists.
+ *
+ * Note that this function has a selection bias towards nodes whose positions in
+ * the shared hash are sequentially adjacent to the positions of nodes that are
+ * in the current node list. This bias follows from our decision to first pick a
+ * random node in the hash, and if that node is a member of the current list, to
+ * simply iterate to the next node in the hash. Overall, this approach trades in
+ * some selection bias for simplicity in design and for bounded execution time.
  */
-static List *
-PrimaryNodesNotInList(List *currentList)
+static WorkerNode *
+FindRandomNodeNotInList(HTAB *WorkerNodesHash, List *currentNodeList)
 {
-	List *workerNodeList = NIL;
-	HTAB *workerNodeHash = GetWorkerNodeHash();
 	WorkerNode *workerNode = NULL;
 	HASH_SEQ_STATUS status;
+	uint32 workerNodeCount = 0;
+	uint32 currentNodeCount PG_USED_FOR_ASSERTS_ONLY = 0;
+	bool lookForWorkerNode = true;
+	uint32 workerPosition = 0;
+	uint32 workerIndex = 0;
 
-	hash_seq_init(&status, workerNodeHash);
+	workerNodeCount = hash_get_num_entries(WorkerNodesHash);
+	currentNodeCount = list_length(currentNodeList);
+	Assert(workerNodeCount > currentNodeCount);
 
-	while ((workerNode = hash_seq_search(&status)) != NULL)
+	/*
+	 * We determine a random position within the worker hash between [1, N],
+	 * assuming that the number of elements in the hash is N. We then get to
+	 * this random position by iterating over the worker hash. Please note that
+	 * the random seed has already been set by the postmaster when starting up.
+	 */
+	workerPosition = (random() % workerNodeCount) + 1;
+	hash_seq_init(&status, WorkerNodesHash);
+
+	for (workerIndex = 0; workerIndex < workerPosition; workerIndex++)
 	{
-		if (ListMember(currentList, workerNode))
-		{
-			continue;
-		}
+		workerNode = (WorkerNode *) hash_seq_search(&status);
+	}
 
-		if (WorkerNodeIsPrimary(workerNode))
+	while (lookForWorkerNode)
+	{
+		bool listMember = ListMember(currentNodeList, workerNode);
+
+		if (!listMember)
 		{
-			workerNodeList = lappend(workerNodeList, workerNode);
+			lookForWorkerNode = false;
+		}
+		else
+		{
+			/* iterate to the next worker node in the hash */
+			workerNode = (WorkerNode *) hash_seq_search(&status);
+
+			/* reached end of hash; start from the beginning */
+			if (workerNode == NULL)
+			{
+				hash_seq_init(&status, WorkerNodesHash);
+				workerNode = (WorkerNode *) hash_seq_search(&status);
+			}
 		}
 	}
 
-	return workerNodeList;
-}
-
-
-/* FindRandomNodeFromList picks a random node from the list provided to it. */
-static WorkerNode *
-FindRandomNodeFromList(List *candidateWorkerNodeList)
-{
-	uint32 candidateNodeCount = list_length(candidateWorkerNodeList);
-
-	/* nb, the random seed has already been set by the postmaster when starting up */
-	uint32 workerPosition = (random() % candidateNodeCount);
-
-	WorkerNode *workerNode =
-		(WorkerNode *) list_nth(candidateWorkerNodeList, workerPosition);
+	/* we stopped scanning before completion; therefore clean up scan */
+	hash_seq_term(&status);
 
 	return workerNode;
 }

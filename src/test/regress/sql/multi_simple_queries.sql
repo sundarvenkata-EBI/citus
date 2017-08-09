@@ -80,9 +80,8 @@ INSERT INTO articles VALUES (50, 10, 'anjanette', 19519);
 -- insert a single row for the test
 INSERT INTO articles_single_shard VALUES (50, 10, 'anjanette', 19519);
 
--- zero-shard modifications should succeed
+-- zero-shard modifications should fail
 UPDATE articles SET title = '' WHERE author_id = 1 AND author_id = 2;
-UPDATE articles SET title = '' WHERE 0 = 1;
 DELETE FROM articles WHERE author_id = 1 AND author_id = 2;
 
 -- single-shard tests

@@ -15,15 +15,12 @@
 
 #include "postgres.h"
 #include "funcapi.h"
-#include "libpq-fe.h"
 
 #include "catalog/pg_class.h"
-#include "distributed/connection_management.h"
 #include "distributed/master_protocol.h"
 #include "distributed/metadata_cache.h"
 #include "distributed/multi_join_order.h"
 #include "distributed/pg_dist_shard.h"
-#include "distributed/remote_commands.h"
 #include "distributed/worker_manager.h"
 #include "distributed/worker_protocol.h"
 #include "utils/builtins.h"
@@ -60,7 +57,7 @@ master_expire_table_cache(PG_FUNCTION_ARGS)
 	CheckCitusVersion(ERROR);
 
 	cacheEntry = DistributedTableCacheEntry(relationId);
-	workerNodeList = ActivePrimaryNodeList();
+	workerNodeList = ActiveWorkerNodeList();
 	shardCount = cacheEntry->shardIntervalArrayLength;
 	shardIntervalArray = cacheEntry->sortedShardIntervalArray;
 
@@ -157,9 +154,6 @@ DropShardsFromWorker(WorkerNode *workerNode, Oid relationId, List *shardInterval
 	StringInfo workerCommand = makeStringInfo();
 	StringInfo shardNames = makeStringInfo();
 	ListCell *shardIntervalCell = NULL;
-	MultiConnection *connection = NULL;
-	int connectionFlag = FORCE_NEW_CONNECTION;
-	PGresult *result = NULL;
 
 	if (shardIntervalList == NIL)
 	{
@@ -183,7 +177,7 @@ DropShardsFromWorker(WorkerNode *workerNode, Oid relationId, List *shardInterval
 		}
 	}
 
-	if (RegularTable(relationId))
+	if (relationKind == RELKIND_RELATION)
 	{
 		appendStringInfo(workerCommand, DROP_REGULAR_TABLE_COMMAND, shardNames->data);
 	}
@@ -194,11 +188,8 @@ DropShardsFromWorker(WorkerNode *workerNode, Oid relationId, List *shardInterval
 	else
 	{
 		ereport(ERROR, (errcode(ERRCODE_WRONG_OBJECT_TYPE),
-						errmsg("expire target is not a regular, foreign or partitioned "
-							   "table")));
+						errmsg("expire target is not a regular or foreign table")));
 	}
 
-	connection = GetNodeConnection(connectionFlag, workerNode->workerName,
-								   workerNode->workerPort);
-	ExecuteOptionalRemoteCommand(connection, workerCommand->data, &result);
+	ExecuteRemoteCommand(workerNode->workerName, workerNode->workerPort, workerCommand);
 }

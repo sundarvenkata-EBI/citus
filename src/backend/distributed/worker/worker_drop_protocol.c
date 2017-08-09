@@ -32,7 +32,7 @@ PG_FUNCTION_INFO_V1(worker_drop_distributed_table);
 /*
  * worker_drop_distributed_table drops the distributed table with the given oid,
  * then, removes the associated rows from pg_dist_partition, pg_dist_shard and
- * pg_dist_placement. The function also drops the server for foreign tables.
+ * pg_dist_shard_placement. The function also drops the server for foreign tables.
  *
  * Note that drop fails if any dependent objects are present for any of the
  * distributed tables. Also, shard placements of the distributed tables are
@@ -62,7 +62,12 @@ worker_drop_distributed_table(PG_FUNCTION_ARGS)
 	/* first check the relation type */
 	distributedRelation = relation_open(relationId, AccessShareLock);
 	relationKind = distributedRelation->rd_rel->relkind;
-	EnsureRelationKindSupported(relationId);
+	if (relationKind != RELKIND_RELATION && relationKind != RELKIND_FOREIGN_TABLE)
+	{
+		char *relationName = generate_relation_name(relationId, NIL);
+		ereport(ERROR, (errcode(ERRCODE_WRONG_OBJECT_TYPE),
+						errmsg("%s is not a regular or foreign table", relationName)));
+	}
 
 	/* close the relation since we do not need anymore */
 	relation_close(distributedRelation, AccessShareLock);
@@ -112,9 +117,11 @@ worker_drop_distributed_table(PG_FUNCTION_ARGS)
 		foreach(shardPlacementCell, shardPlacementList)
 		{
 			ShardPlacement *placement = (ShardPlacement *) lfirst(shardPlacementCell);
+			char *workerName = placement->nodeName;
+			uint32 workerPort = placement->nodePort;
 
-			/* delete the row from pg_dist_placement */
-			DeleteShardPlacementRow(placement->placementId);
+			/* delete the row from pg_dist_shard_placement */
+			DeleteShardPlacementRow(shardId, workerName, workerPort);
 		}
 
 		/* delete the row from pg_dist_shard */

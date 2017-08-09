@@ -16,7 +16,6 @@
 #include "distributed/errormessage.h"
 #include "distributed/metadata_cache.h"
 #include "distributed/multi_planner.h"
-#include "distributed/multi_server_executor.h"
 
 static const char *CitusNodeTagNamesD[] = {
 	"MultiNode",
@@ -33,12 +32,10 @@ static const char *CitusNodeTagNamesD[] = {
 	"MapMergeJob",
 	"MultiPlan",
 	"Task",
-	"TaskExecution",
 	"ShardInterval",
 	"ShardPlacement",
 	"RelationShard",
-	"DeferredErrorMessage",
-	"GroupShardPlacement"
+	"DeferredErrorMessage"
 };
 
 const char **CitusNodeTagNames = CitusNodeTagNamesD;
@@ -297,10 +294,6 @@ GetRangeTblKind(RangeTblEntry *rte)
 	switch (rte->rtekind)
 	{
 		/* directly rtekind if it's not possibly an extended RTE */
-#if (PG_VERSION_NUM >= 100000)
-		case RTE_TABLEFUNC:
-		case RTE_NAMEDTUPLESTORE:
-#endif
 		case RTE_RELATION:
 		case RTE_SUBQUERY:
 		case RTE_JOIN:
@@ -342,6 +335,8 @@ citus_extradata_container(PG_FUNCTION_ARGS)
 }
 
 
+#if (PG_VERSION_NUM >= 90600)
+
 static void
 CopyUnsupportedCitusNode(struct ExtensibleNode *newnode,
 						 const struct ExtensibleNode *oldnode)
@@ -363,7 +358,7 @@ EqualUnsupportedCitusNode(const struct ExtensibleNode *a,
 	{ \
 		#type, \
 		sizeof(type), \
-		CopyNode##type, \
+		CopyUnsupportedCitusNode, \
 		EqualUnsupportedCitusNode, \
 		Out##type, \
 		Read##type \
@@ -390,9 +385,7 @@ const ExtensibleNodeMethods nodeMethods[] =
 	DEFINE_NODE_METHODS(ShardPlacement),
 	DEFINE_NODE_METHODS(RelationShard),
 	DEFINE_NODE_METHODS(Task),
-	DEFINE_NODE_METHODS(TaskExecution),
 	DEFINE_NODE_METHODS(DeferredErrorMessage),
-	DEFINE_NODE_METHODS(GroupShardPlacement),
 
 	/* nodes with only output support */
 	DEFINE_NODE_METHODS_NO_READ(MultiNode),
@@ -406,10 +399,12 @@ const ExtensibleNodeMethods nodeMethods[] =
 	DEFINE_NODE_METHODS_NO_READ(MultiCartesianProduct),
 	DEFINE_NODE_METHODS_NO_READ(MultiExtendedOp)
 };
+#endif
 
 void
 RegisterNodes(void)
 {
+#if (PG_VERSION_NUM >= 90600)
 	int off;
 
 	StaticAssertExpr(lengthof(nodeMethods) == lengthof(CitusNodeTagNamesD),
@@ -419,4 +414,5 @@ RegisterNodes(void)
 	{
 		RegisterExtensibleNodeMethods(&nodeMethods[off]);
 	}
+#endif
 }

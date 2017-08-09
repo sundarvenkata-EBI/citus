@@ -185,6 +185,21 @@ TryLockShardDistributionMetadata(int64 shardId, LOCKMODE lockMode)
 
 
 /*
+ * LockRelationDistributionMetadata returns after getting a the lock used for a
+ * relation's distribution metadata, blocking if required. Only ExclusiveLock
+ * and ShareLock modes are supported. Any locks acquired using this method are
+ * released at transaction end.
+ */
+void
+LockRelationDistributionMetadata(Oid relationId, LOCKMODE lockMode)
+{
+	Assert(lockMode == ExclusiveLock || lockMode == ShareLock);
+
+	(void) LockRelationOid(relationId, lockMode);
+}
+
+
+/*
  * LockShardResource acquires a lock needed to modify data on a remote shard.
  * This task may be assigned to multiple backends at the same time, so the lock
  * manages any concurrency issues associated with shard file fetching and DML
@@ -315,4 +330,19 @@ LockRelationShardResources(List *relationShardList, LOCKMODE lockMode)
 			LockShardResource(shardId, lockMode);
 		}
 	}
+}
+
+
+/*
+ * LockMetadataSnapshot acquires a lock needed to serialize changes to pg_dist_node
+ * and all other metadata changes. Operations that modify pg_dist_node should acquire
+ * AccessExclusiveLock. All other metadata changes should acquire AccessShareLock. Any locks
+ * acquired using this method are released at transaction end.
+ */
+void
+LockMetadataSnapshot(LOCKMODE lockMode)
+{
+	Assert(lockMode == AccessExclusiveLock || lockMode == AccessShareLock);
+
+	(void) LockRelationOid(DistNodeRelationId(), lockMode);
 }

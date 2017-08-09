@@ -94,12 +94,11 @@ CREATE UNIQUE INDEX mx_test_uniq_index ON mx_table(col_1);
 \c - - - :worker_1_port
 
 -- DDL commands
-SELECT "Column", "Type", "Modifiers" FROM table_desc WHERE relid='public.mx_table'::regclass;
+\d mx_table
 CREATE INDEX mx_test_index ON mx_table(col_2);
 ALTER TABLE mx_table ADD COLUMN col_4 int;
 ALTER TABLE mx_table_2 ADD CONSTRAINT mx_fk_constraint FOREIGN KEY(col_1) REFERENCES mx_table(col_1);
-SELECT "Column", "Type", "Modifiers" FROM table_desc WHERE relid='public.mx_table'::regclass;
-\d mx_test_index
+\d mx_table
 
 -- master_modify_multiple_shards
 SELECT master_modify_multiple_shards('UPDATE mx_table SET col_2=''none''');
@@ -118,17 +117,17 @@ SELECT count(*) FROM mx_table;
 
 -- master_add_node
 
-SELECT 1 FROM master_add_node('localhost', 5432);
-SELECT count(1) FROM pg_dist_node WHERE nodename='localhost' AND nodeport=5432;
+SELECT master_add_node('localhost', 5432);
+SELECT * FROM pg_dist_node WHERE nodename='localhost' AND nodeport=5432;
 
 -- master_remove_node
 \c - - - :master_port
 DROP INDEX mx_test_uniq_index;
-SELECT 1 FROM master_add_node('localhost', 5432);
+SELECT master_add_node('localhost', 5432);
 
 \c - - - :worker_1_port
 SELECT master_remove_node('localhost', 5432);
-SELECT count(1) FROM pg_dist_node WHERE nodename='localhost' AND nodeport=5432;
+SELECT * FROM pg_dist_node WHERE nodename='localhost' AND nodeport=5432;
 
 \c - - - :master_port
 SELECT master_remove_node('localhost', 5432);
@@ -138,12 +137,8 @@ SELECT master_remove_node('localhost', 5432);
 TRUNCATE mx_table;
 SELECT count(*) FROM mx_table;
 
--- INSERT / SELECT pulls results to worker
-BEGIN;
-SET LOCAL client_min_messages TO DEBUG;
+-- INSERT / SELECT
 INSERT INTO mx_table_2 SELECT * FROM mx_table;
-END;
-
 SELECT count(*) FROM mx_table_2;
 
 -- mark_tables_colocated
@@ -176,8 +171,8 @@ SELECT hasmetadata FROM pg_dist_node WHERE nodeport=:worker_2_port;
 SELECT stop_metadata_sync_to_node('localhost', :worker_2_port);
 SELECT hasmetadata FROM pg_dist_node WHERE nodeport=:worker_2_port;
 \c - - - :worker_2_port
-SELECT worker_drop_distributed_table(logicalrelid) FROM pg_dist_partition;
 DELETE FROM pg_dist_node;
+SELECT worker_drop_distributed_table(logicalrelid) FROM pg_dist_partition;
 \c - - - :worker_1_port
 
 -- DROP TABLE
@@ -195,9 +190,8 @@ WHERE logicalrelid = 'mx_table'::regclass AND nodeport=:worker_1_port
 ORDER BY shardid
 LIMIT 1 \gset
 
-SELECT groupid AS worker_2_group FROM pg_dist_node WHERE nodeport = :worker_2_port \gset
-INSERT INTO pg_dist_placement (groupid, shardid, shardstate, shardlength)
-VALUES (:worker_2_group, :testshardid, 3, 0);
+INSERT INTO pg_dist_shard_placement (nodename, nodeport, shardid, shardstate, shardlength)
+VALUES ('localhost', :worker_2_port, :testshardid, 3, 0);
 
 SELECT master_copy_shard_placement(:testshardid, 'localhost', :worker_1_port, 'localhost', :worker_2_port);
 
@@ -206,7 +200,7 @@ FROM pg_dist_shard_placement
 WHERE shardid = :testshardid
 ORDER BY nodeport;
 
-DELETE FROM pg_dist_placement WHERE groupid = :worker_2_group AND shardid = :testshardid;
+DELETE FROM pg_dist_shard_placement WHERE nodeport = :worker_2_port AND shardid = :testshardid;
 
 -- master_get_new_placementid
 SELECT master_get_new_placementid();
@@ -219,9 +213,9 @@ DROP SEQUENCE some_sequence;
 
 -- Show that dropping the sequence of an MX table with cascade harms the table and shards
 BEGIN;
-SELECT "Column", "Type", "Modifiers" FROM table_desc WHERE relid='public.mx_table'::regclass;
+\d mx_table
 DROP SEQUENCE mx_table_col_3_seq CASCADE;
-SELECT "Column", "Type", "Modifiers" FROM table_desc WHERE relid='public.mx_table'::regclass;
+\d mx_table
 ROLLBACK;
 
 -- Cleanup

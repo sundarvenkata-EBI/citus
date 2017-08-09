@@ -16,7 +16,6 @@
 #include "distributed/citus_nodefuncs.h"
 #include "distributed/citus_ruleutils.h"
 #include "distributed/deparse_shard_query.h"
-#include "distributed/insert_select_planner.h"
 #include "distributed/metadata_cache.h"
 #include "distributed/multi_physical_planner.h"
 #include "distributed/multi_router_planner.h"
@@ -77,38 +76,14 @@ RebuildQueryStrings(Query *originalQuery, List *taskList)
 
 			UpdateRelationToShardNames((Node *) copiedSubquery, relationShardList);
 		}
-		else if (task->upsertQuery)
-		{
-			RangeTblEntry *rangeTableEntry = NULL;
 
-			/* setting an alias simplifies deparsing of UPSERTs */
-			rangeTableEntry = linitial(query->rtable);
-			if (rangeTableEntry->alias == NULL)
-			{
-				Alias *alias = makeAlias(CITUS_TABLE_ALIAS, NIL);
-				rangeTableEntry->alias = alias;
-			}
-		}
+		deparse_shard_query(query, relationId, task->anchorShardId,
+							newQueryString);
 
-		/*
-		 * For INSERT queries, we only have one relation to update, so we can
-		 * use deparse_shard_query(). For UPDATE and DELETE queries, we may have
-		 * subqueries and joins, so we use relation shard list to update shard
-		 * names and call pg_get_query_def() directly.
-		 */
-		if (query->commandType == CMD_INSERT)
-		{
-			deparse_shard_query(query, relationId, task->anchorShardId, newQueryString);
-		}
-		else
-		{
-			List *relationShardList = task->relationShardList;
-			UpdateRelationToShardNames((Node *) query, relationShardList);
-
-			pg_get_query_def(query, newQueryString);
-		}
-
-		ereport(DEBUG4, (errmsg("distributed statement: %s", newQueryString->data)));
+		ereport(DEBUG4, (errmsg("query before rebuilding: %s",
+								task->queryString)));
+		ereport(DEBUG4, (errmsg("query after rebuilding:  %s",
+								newQueryString->data)));
 
 		task->queryString = newQueryString->data;
 	}

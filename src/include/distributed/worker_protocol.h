@@ -128,6 +128,8 @@ extern List * TableDDLCommandList(const char *nodeName, uint32 nodePort,
 extern StringInfo TaskFilename(StringInfo directoryName, uint32 taskId);
 extern List * ExecuteRemoteQuery(const char *nodeName, uint32 nodePort, char *runAsUser,
 								 StringInfo queryString);
+extern bool ExecuteRemoteCommand(const char *nodeName, uint32 nodePort,
+								 StringInfo queryString);
 extern List * ColumnDefinitionList(List *columnNameList, List *columnTypeList);
 extern CreateStmt * CreateStatement(RangeVar *relation, List *columnDefinitionList);
 extern CopyStmt * CopyStatement(RangeVar *relation, char *sourceFilename);
@@ -135,7 +137,6 @@ extern Datum CompareCall2(FmgrInfo *funcInfo, Datum leftArgument, Datum rightArg
 
 /* Function declaration for parsing tree node */
 extern Node * ParseTreeNode(const char *ddlCommand);
-extern Node * ParseTreeRawStmt(const char *ddlCommand);
 
 /* Function declarations for applying distributed execution primitives */
 extern Datum worker_fetch_partition_file(PG_FUNCTION_ARGS);

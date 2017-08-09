@@ -440,7 +440,8 @@ SELECT master_create_distributed_table('customer_worker_copy_append_seq', 'id', 
 \c - - - 57637
 -- Test copy from the worker node
 COPY customer_worker_copy_append_seq FROM '@abs_srcdir@/data/customer.1.data' with (delimiter '|', master_host 'localhost', master_port 57636);
-ERROR:  relation "public.customer_worker_copy_append_seq_seq_seq" does not exist
+ERROR:  cannot copy to table with serial column from worker
+HINT:  Connect to the master node to COPY to tables which use serial column types.
 -- Connect back to the master node
 \c - - - 57636
 -- Create customer table for the worker copy with constraint and index
@@ -764,12 +765,12 @@ SELECT shardid, nodename, nodeport
 (6 rows)
 
 -- add the node back
-SELECT 1 FROM master_activate_node('localhost', :worker_1_port);
+SELECT master_activate_node('localhost', :worker_1_port);
 NOTICE:  Replicating reference table "nation" to the node localhost:57637
 NOTICE:  Replicating reference table "supplier" to the node localhost:57637
- ?column? 
-----------
-        1
+       master_activate_node        
+-----------------------------------
+ (1,1,localhost,57637,default,f,t)
 (1 row)
 
 RESET citus.shard_replication_factor;
@@ -1034,23 +1035,3 @@ SELECT * FROM test_smgr;
 (1 row)
 
 DROP TABLE test_smgr;
--- Test drop table with copy in the same transaction
-BEGIN;
-CREATE TABLE tt1(id int);
-SELECT create_distributed_table('tt1','id');
- create_distributed_table 
---------------------------
- 
-(1 row)
-
-\copy tt1 from STDIN;
-DROP TABLE tt1;
-END;
--- There should be no "tt1" shard on the worker nodes
-\c - - - :worker_1_port
-SELECT relname FROM pg_class WHERE relname LIKE 'tt1%';
- relname 
----------
-(0 rows)
-
-\c - - - :master_port

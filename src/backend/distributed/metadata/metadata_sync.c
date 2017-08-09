@@ -111,15 +111,6 @@ start_metadata_sync_to_node(PG_FUNCTION_ARGS)
 
 	MarkNodeHasMetadata(nodeNameString, nodePort, true);
 
-	if (!WorkerNodeIsPrimary(workerNode))
-	{
-		/*
-		 * If this is a secondary node we can't actually sync metadata to it; we assume
-		 * the primary node is receiving metadata.
-		 */
-		PG_RETURN_VOID();
-	}
-
 	/* generate and add the local group id's update query */
 	localGroupIdUpdateCommand = LocalGroupIdUpdateCommand(workerNode->groupId);
 
@@ -218,7 +209,7 @@ ShouldSyncTableMetadata(Oid relationId)
  * (ii)  Queries that create the clustered tables
  * (iii) Queries that populate pg_dist_partition table referenced by (ii)
  * (iv)  Queries that populate pg_dist_shard table referenced by (iii)
- * (v)   Queries that populate pg_dist_placement table referenced by (iv)
+ * (v)   Queries that populate pg_dist_shard_placement table referenced by (iv)
  */
 List *
 MetadataCreateCommands(void)
@@ -226,7 +217,7 @@ MetadataCreateCommands(void)
 	List *metadataSnapshotCommandList = NIL;
 	List *distributedTableList = DistributedTableList();
 	List *propagatedTableList = NIL;
-	List *workerNodeList = ActivePrimaryNodeList();
+	List *workerNodeList = ActiveWorkerNodeList();
 	ListCell *distributedTableCell = NULL;
 	char *nodeListInsertCommand = NULL;
 	bool includeSequenceDefaults = true;
@@ -355,7 +346,7 @@ GetDistributedTableDDLEvents(Oid relationId)
 	truncateTriggerCreateCommand = TruncateTriggerCreateCommand(relationId);
 	commandList = lappend(commandList, truncateTriggerCreateCommand);
 
-	/* commands to insert pg_dist_shard & pg_dist_placement entries */
+	/* commands to insert pg_dist_shard & pg_dist_shard_placement entries */
 	shardIntervalList = LoadShardIntervalList(relationId);
 	shardMetadataInsertCommandList = ShardListInsertCommand(shardIntervalList);
 	commandList = list_concat(commandList, shardMetadataInsertCommandList);
@@ -379,18 +370,23 @@ GetDistributedTableDDLEvents(Oid relationId)
  *       from the worker itself to prevent dropping any non-distributed tables
  *       with the same name.
  * (iii) Queries that delete all the rows from pg_dist_shard table referenced by (ii)
- * (iv) Queries that delete all the rows from pg_dist_placement table
+ * (iv) Queries that delete all the rows from pg_dist_shard_placement table
  *      referenced by (iii)
  */
 List *
 MetadataDropCommands(void)
 {
 	List *dropSnapshotCommandList = NIL;
+	char *removeTablesCommand = NULL;
+	char *removeNodesCommand = NULL;
 
+	removeNodesCommand = DELETE_ALL_NODES;
 	dropSnapshotCommandList = lappend(dropSnapshotCommandList,
-									  REMOVE_ALL_CLUSTERED_TABLES_COMMAND);
+									  removeNodesCommand);
 
-	dropSnapshotCommandList = lappend(dropSnapshotCommandList, DELETE_ALL_NODES);
+	removeTablesCommand = REMOVE_ALL_CLUSTERED_TABLES_COMMAND;
+	dropSnapshotCommandList = lappend(dropSnapshotCommandList,
+									  removeTablesCommand);
 
 	return dropSnapshotCommandList;
 }
@@ -407,7 +403,6 @@ NodeListInsertCommand(List *workerNodeList)
 	StringInfo nodeListInsertCommand = makeStringInfo();
 	int workerCount = list_length(workerNodeList);
 	int processedWorkerNodeCount = 0;
-	Oid primaryRole = PrimaryNodeRoleId();
 
 	/* if there are no workers, return NULL */
 	if (workerCount == 0)
@@ -415,18 +410,10 @@ NodeListInsertCommand(List *workerNodeList)
 		return nodeListInsertCommand->data;
 	}
 
-	if (primaryRole == InvalidOid)
-	{
-		ereport(ERROR, (errmsg("bad metadata, noderole does not exist"),
-						errdetail("you should never see this, please submit "
-								  "a bug report"),
-						errhint("run ALTER EXTENSION citus UPDATE and try again")));
-	}
-
 	/* generate the query without any values yet */
 	appendStringInfo(nodeListInsertCommand,
 					 "INSERT INTO pg_dist_node (nodeid, groupid, nodename, nodeport, "
-					 "noderack, hasmetadata, isactive, noderole, nodecluster) VALUES ");
+					 "noderack, hasmetadata, isactive) VALUES ");
 
 	/* iterate over the worker nodes, add the values */
 	foreach(workerNodeCell, workerNodeList)
@@ -435,21 +422,15 @@ NodeListInsertCommand(List *workerNodeList)
 		char *hasMetadataString = workerNode->hasMetadata ? "TRUE" : "FALSE";
 		char *isActiveString = workerNode->isActive ? "TRUE" : "FALSE";
 
-		Datum nodeRoleOidDatum = ObjectIdGetDatum(workerNode->nodeRole);
-		Datum nodeRoleStringDatum = DirectFunctionCall1(enum_out, nodeRoleOidDatum);
-		char *nodeRoleString = DatumGetCString(nodeRoleStringDatum);
-
 		appendStringInfo(nodeListInsertCommand,
-						 "(%d, %d, %s, %d, %s, %s, %s, '%s'::noderole, %s)",
+						 "(%d, %d, %s, %d, %s, %s, %s)",
 						 workerNode->nodeId,
 						 workerNode->groupId,
 						 quote_literal_cstr(workerNode->workerName),
 						 workerNode->workerPort,
 						 quote_literal_cstr(workerNode->workerRack),
 						 hasMetadataString,
-						 isActiveString,
-						 nodeRoleString,
-						 quote_literal_cstr(workerNode->nodeCluster));
+						 isActiveString);
 
 		processedWorkerNodeCount++;
 		if (processedWorkerNodeCount != workerCount)
@@ -585,9 +566,9 @@ ShardListInsertCommand(List *shardIntervalList)
 			{
 				/* generate the shard placement query without any values yet */
 				appendStringInfo(insertPlacementCommand,
-								 "INSERT INTO pg_dist_placement "
+								 "INSERT INTO pg_dist_shard_placement "
 								 "(shardid, shardstate, shardlength,"
-								 " groupid, placementid) "
+								 " nodename, nodeport, placementid) "
 								 "VALUES ");
 			}
 			else
@@ -596,10 +577,11 @@ ShardListInsertCommand(List *shardIntervalList)
 			}
 
 			appendStringInfo(insertPlacementCommand,
-							 "(%lu, 1, %lu, %d, %lu)",
+							 "(%lu, 1, %lu, %s, %d, %lu)",
 							 shardId,
 							 placement->shardLength,
-							 placement->groupId,
+							 quote_literal_cstr(placement->nodeName),
+							 placement->nodePort,
 							 placement->placementId);
 		}
 	}
@@ -682,7 +664,7 @@ ShardDeleteCommandList(ShardInterval *shardInterval)
 	/* create command to delete shard placements */
 	deletePlacementCommand = makeStringInfo();
 	appendStringInfo(deletePlacementCommand,
-					 "DELETE FROM pg_dist_placement WHERE shardid = %lu",
+					 "DELETE FROM pg_dist_shard_placement WHERE shardid = %lu",
 					 shardId);
 
 	commandList = lappend(commandList, deletePlacementCommand->data);
@@ -753,18 +735,18 @@ ColocationIdUpdateCommand(Oid relationId, uint32 colocationId)
 
 
 /*
- * PlacementUpsertCommand creates a SQL command for upserting a pg_dist_placment
+ * PlacementUpsertCommand creates a SQL command for upserting a pg_dist_shard_placment
  * entry with the given properties. In the case of a conflict on placementId, the command
  * updates all properties (excluding the placementId) with the given ones.
  */
 char *
 PlacementUpsertCommand(uint64 shardId, uint64 placementId, int shardState,
-					   uint64 shardLength, uint32 groupId)
+					   uint64 shardLength, char *nodeName, uint32 nodePort)
 {
 	StringInfo command = makeStringInfo();
 
 	appendStringInfo(command, UPSERT_PLACEMENT, shardId, shardState, shardLength,
-					 groupId, placementId);
+					 quote_literal_cstr(nodeName), nodePort, placementId);
 
 	return command->data;
 }
@@ -830,8 +812,9 @@ MarkNodeHasMetadata(char *nodeName, int32 nodePort, bool hasMetadata)
 	replace[Anum_pg_dist_node_hasmetadata - 1] = true;
 
 	heapTuple = heap_modify_tuple(heapTuple, tupleDescriptor, values, isnull, replace);
+	simple_heap_update(pgDistNode, &heapTuple->t_self, heapTuple);
 
-	CatalogTupleUpdate(pgDistNode, &heapTuple->t_self, heapTuple);
+	CatalogUpdateIndexes(pgDistNode, heapTuple);
 
 	CitusInvalidateRelcacheByRelid(DistNodeRelationId());
 
@@ -854,11 +837,7 @@ List *
 SequenceDDLCommandsForTable(Oid relationId)
 {
 	List *sequenceDDLList = NIL;
-#if (PG_VERSION_NUM >= 100000)
-	List *ownedSequences = getOwnedSequences(relationId, InvalidAttrNumber);
-#else
 	List *ownedSequences = getOwnedSequences(relationId);
-#endif
 	ListCell *listCell;
 	char *ownerName = TableOwner(relationId);
 
@@ -942,19 +921,7 @@ EnsureSupportedSequenceColumnType(Oid sequenceOid)
 	bool hasMetadataWorkers = HasMetadataWorkers();
 
 	/* call sequenceIsOwned in order to get the tableId and columnId */
-#if (PG_VERSION_NUM >= 100000)
-	bool sequenceOwned = sequenceIsOwned(sequenceOid, DEPENDENCY_AUTO, &tableId,
-										 &columnId);
-	if (!sequenceOwned)
-	{
-		sequenceOwned = sequenceIsOwned(sequenceOid, DEPENDENCY_INTERNAL, &tableId,
-										&columnId);
-	}
-
-	Assert(sequenceOwned);
-#else
 	sequenceIsOwned(sequenceOid, &tableId, &columnId);
-#endif
 
 	shouldSyncMetadata = ShouldSyncTableMetadata(tableId);
 
@@ -1038,7 +1005,7 @@ SchemaOwnerName(Oid objectId)
 static bool
 HasMetadataWorkers(void)
 {
-	List *workerNodeList = ActivePrimaryNodeList();
+	List *workerNodeList = ActiveWorkerNodeList();
 	ListCell *workerNodeCell = NULL;
 
 	foreach(workerNodeCell, workerNodeList)

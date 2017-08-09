@@ -15,9 +15,6 @@
 #include "access/xact.h"
 #include "catalog/dependency.h"
 #include "catalog/namespace.h"
-#include "distributed/insert_select_executor.h"
-#include "distributed/insert_select_planner.h"
-#include "distributed/multi_copy.h"
 #include "distributed/multi_executor.h"
 #include "distributed/multi_master_planner.h"
 #include "distributed/multi_planner.h"
@@ -29,7 +26,6 @@
 #include "executor/execdebug.h"
 #include "commands/copy.h"
 #include "nodes/makefuncs.h"
-#include "parser/parsetree.h"
 #include "storage/lmgr.h"
 #include "tcop/utility.h"
 #include "utils/snapmgr.h"
@@ -84,15 +80,6 @@ static CustomExecMethods RouterSelectCustomExecMethods = {
 	.ExplainCustomScan = CitusExplainScan
 };
 
-static CustomExecMethods CoordinatorInsertSelectCustomExecMethods = {
-	.CustomName = "CoordinatorInsertSelectScan",
-	.BeginCustomScan = CitusSelectBeginScan,
-	.ExecCustomScan = CoordinatorInsertSelectExecScan,
-	.EndCustomScan = CitusEndScan,
-	.ReScanCustomScan = CitusReScan,
-	.ExplainCustomScan = CoordinatorInsertSelectExplainScan
-};
-
 
 /* local function forward declarations */
 static void PrepareMasterJobDirectory(Job *workerJob);
@@ -105,8 +92,9 @@ static Relation StubRelation(TupleDesc tupleDescriptor);
  */
 Node *
 RealTimeCreateScan(CustomScan *scan)
-{
+{  
 	CitusScanState *scanState = palloc0(sizeof(CitusScanState));
+	ereport(WARNING, (errmsg("Came to line 96 in multi_executor.c")));
 
 	scanState->executorType = MULTI_EXECUTOR_REAL_TIME;
 	scanState->customScanState.ss.ps.type = T_CustomScanState;
@@ -158,8 +146,8 @@ RouterCreateScan(CustomScan *scan)
 
 	isModificationQuery = IsModifyMultiPlan(multiPlan);
 
-	/* check whether query has at most one shard */
-	if (list_length(taskList) <= 1)
+	/* check if this is a single shard query */
+	if (list_length(taskList) == 1)
 	{
 		if (isModificationQuery)
 		{
@@ -175,25 +163,6 @@ RouterCreateScan(CustomScan *scan)
 		Assert(isModificationQuery);
 		scanState->customScanState.methods = &RouterMultiModifyCustomExecMethods;
 	}
-
-	return (Node *) scanState;
-}
-
-
-/*
- * CoordinatorInsertSelectCrateScan creates the scan state for executing
- * INSERT..SELECT into a distributed table via the coordinator.
- */
-Node *
-CoordinatorInsertSelectCreateScan(CustomScan *scan)
-{
-	CitusScanState *scanState = palloc0(sizeof(CitusScanState));
-
-	scanState->executorType = MULTI_EXECUTOR_COORDINATOR_INSERT_SELECT;
-	scanState->customScanState.ss.ps.type = T_CustomScanState;
-	scanState->multiPlan = GetMultiPlan(scan);
-
-	scanState->customScanState.methods = &CoordinatorInsertSelectCustomExecMethods;
 
 	return (Node *) scanState;
 }
@@ -239,8 +208,9 @@ CitusSelectBeginScan(CustomScanState *node, EState *estate, int eflags)
 TupleTableSlot *
 RealTimeExecScan(CustomScanState *node)
 {
-	CitusScanState *scanState = (CitusScanState *) node;
+	CitusScanState *scanState = (CitusScanState *) node;	
 	TupleTableSlot *resultSlot = NULL;
+	ereport(WARNING, (errmsg("Came to line 212 in multi_executor.c")));
 
 	if (!scanState->finishedRemoteScan)
 	{
@@ -320,15 +290,7 @@ LoadTuplesIntoTupleStore(CitusScanState *citusScanState, Job *workerJob)
 
 	if (BinaryMasterCopyFormat)
 	{
-		DefElem *copyOption = NULL;
-
-#if (PG_VERSION_NUM >= 100000)
-		int location = -1; /* "unknown" token location */
-		copyOption = makeDefElem("format", (Node *) makeString("binary"), location);
-#else
-		copyOption = makeDefElem("format", (Node *) makeString("binary"));
-#endif
-
+		DefElem *copyOption = makeDefElem("format", (Node *) makeString("binary"));
 		copyOptions = lappend(copyOptions, copyOption);
 	}
 
@@ -342,13 +304,8 @@ LoadTuplesIntoTupleStore(CitusScanState *citusScanState, Job *workerJob)
 		jobDirectoryName = MasterJobDirectoryName(workerTask->jobId);
 		taskFilename = TaskFilename(jobDirectoryName, workerTask->taskId);
 
-#if (PG_VERSION_NUM >= 100000)
-		copyState = BeginCopyFrom(NULL, stubRelation, taskFilename->data, false, NULL,
-								  NULL, copyOptions);
-#else
 		copyState = BeginCopyFrom(stubRelation, taskFilename->data, false, NULL,
 								  copyOptions);
-#endif
 
 		while (true)
 		{

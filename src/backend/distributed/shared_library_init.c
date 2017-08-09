@@ -1,7 +1,7 @@
 /*-------------------------------------------------------------------------
  *
  * shared_library_init.c
- *	  Functionality related to the initialization of the Citus extension.
+ *	  Initialize Citus extension
  *
  * Copyright (c) 2012-2016, Citus Data, Inc.
  *-------------------------------------------------------------------------
@@ -19,11 +19,9 @@
 #include "citus_version.h"
 #include "commands/explain.h"
 #include "executor/executor.h"
-#include "distributed/backend_data.h"
 #include "distributed/citus_nodefuncs.h"
 #include "distributed/connection_management.h"
 #include "distributed/connection_management.h"
-#include "distributed/maintenanced.h"
 #include "distributed/master_metadata_utility.h"
 #include "distributed/master_protocol.h"
 #include "distributed/multi_copy.h"
@@ -38,7 +36,6 @@
 #include "distributed/pg_dist_partition.h"
 #include "distributed/placement_connection.h"
 #include "distributed/remote_commands.h"
-#include "distributed/shared_library_init.h"
 #include "distributed/task_tracker.h"
 #include "distributed/transaction_management.h"
 #include "distributed/worker_manager.h"
@@ -153,29 +150,25 @@ _PG_init(void)
 	/* make our additional node types known */
 	RegisterNodes();
 
+	ereport(WARNING,(errmsg("Came to line 153 in shared_library_init.c")));
 	/* intercept planner */
 	planner_hook = multi_planner;
 
 	/* register utility hook */
-#if (PG_VERSION_NUM >= 100000)
 	ProcessUtility_hook = multi_ProcessUtility;
-#else
-	ProcessUtility_hook = multi_ProcessUtility9x;
-#endif
 
 	/* register for planner hook */
 	set_rel_pathlist_hook = multi_relation_restriction_hook;
 	set_join_pathlist_hook = multi_join_restriction_hook;
-
-	InitializeMaintenanceDaemon();
 
 	/* organize that task tracker is started once server is up */
 	TaskTrackerRegister();
 
 	/* initialize coordinated transaction management */
 	InitializeTransactionManagement();
-	InitializeBackendManagement();
+	ereport(WARNING,(errmsg("Transaction initialize management done")));	
 	InitializeConnectionManagement();
+	ereport(WARNING,(errmsg("Connection initialize management done")));	
 	InitPlacementConnectionManagement();
 
 	/* enable modification of pg_catalog tables during pg_upgrade */
@@ -184,22 +177,6 @@ _PG_init(void)
 		SetConfigOption("allow_system_table_mods", "true", PGC_POSTMASTER,
 						PGC_S_OVERRIDE);
 	}
-}
-
-
-/*
- * StartupCitusBackend initializes per-backend infrastructure, and is called
- * the first time citus is used in a database.
- *
- * NB: All code here has to be able to cope with this routine being called
- * multiple times in the same backend.  This will e.g. happen when the
- * extension is created or upgraded.
- */
-void
-StartupCitusBackend(void)
-{
-	InitializeMaintenanceDaemonBackend();
-	InitializeBackendData();
 }
 
 
@@ -670,16 +647,6 @@ RegisterCitusConfigVariables(void)
 		0,
 		NULL, NULL, NULL);
 
-	DefineCustomStringVariable(
-		"citus.cluster_name",
-		gettext_noop("Which cluster this node is a part of"),
-		NULL,
-		&CurrentCluster,
-		"default",
-		PGC_SU_BACKEND,
-		0,
-		NULL, NULL, NULL);
-
 	DefineCustomBoolVariable(
 		"citus.enable_version_checks",
 		gettext_noop("Enables version checks during CREATE/ALTER EXTENSION commands"),
@@ -700,19 +667,6 @@ RegisterCitusConfigVariables(void)
 		true,
 		PGC_USERSET,
 		GUC_SUPERUSER_ONLY | GUC_NO_SHOW_ALL,
-		NULL, NULL, NULL);
-
-	DefineCustomIntVariable(
-		"citus.max_task_string_size",
-		gettext_noop("Sets the maximum size (in bytes) of a worker task call string."),
-		gettext_noop("Active worker tasks' are tracked in a shared hash table "
-					 "on the master node. This configuration value limits the "
-					 "maximum size of an individual worker task, and "
-					 "affects the size of pre-allocated shared memory."),
-		&MaxTaskStringSize,
-		12288, 8192, 65536,
-		PGC_POSTMASTER,
-		0,
 		NULL, NULL, NULL);
 
 	/* warn about config items in the citus namespace that are not registered above */

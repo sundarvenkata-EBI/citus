@@ -21,7 +21,6 @@
 #include "distributed/connection_management.h"
 #include "distributed/metadata_cache.h"
 #include "distributed/multi_server_executor.h"
-#include "distributed/remote_commands.h"
 #include "distributed/worker_protocol.h"
 #include "lib/stringinfo.h"
 #include "utils/builtins.h"
@@ -40,11 +39,11 @@ static void ExecuteCommandsInParallelAndStoreResults(StringInfo *nodeNameArray,
 													 bool *statusArray,
 													 StringInfo *resultStringArray,
 													 int commmandCount);
-static bool GetConnectionStatusAndResult(MultiConnection *connection, bool *resultStatus,
+static bool GetConnectionStatusAndResult(PGconn *connection, bool *resultStatus,
 										 StringInfo queryResultString);
-static bool EvaluateQueryResult(MultiConnection *connection, PGresult *queryResult,
-								StringInfo queryResultString);
-static void StoreErrorMessage(MultiConnection *connection, StringInfo queryResultString);
+static bool EvaluateQueryResult(PGconn *connection, PGresult *queryResult, StringInfo
+								queryResultString);
+static void StoreErrorMessage(PGconn *connection, StringInfo queryResultString);
 static void ExecuteCommandsAndStoreResults(StringInfo *nodeNameArray,
 										   int *nodePortArray,
 										   StringInfo *commandStringArray,
@@ -224,8 +223,7 @@ ExecuteCommandsInParallelAndStoreResults(StringInfo *nodeNameArray, int *nodePor
 										 int commmandCount)
 {
 	int commandIndex = 0;
-	MultiConnection **connectionArray =
-		palloc0(commmandCount * sizeof(MultiConnection *));
+	PGconn **connectionArray = palloc0(commmandCount * sizeof(PGconn *));
 	int finishedCount = 0;
 
 	/* establish connections */
@@ -234,13 +232,14 @@ ExecuteCommandsInParallelAndStoreResults(StringInfo *nodeNameArray, int *nodePor
 		char *nodeName = nodeNameArray[commandIndex]->data;
 		int nodePort = nodePortArray[commandIndex];
 		int connectionFlags = FORCE_NEW_CONNECTION;
-		MultiConnection *connection =
+		MultiConnection *multiConnection =
 			GetNodeConnection(connectionFlags, nodeName, nodePort);
+		PGconn *connection = multiConnection->pgConn;
 		StringInfo queryResultString = resultStringArray[commandIndex];
 
 		statusArray[commandIndex] = true;
 
-		if (PQstatus(connection->pgConn) != CONNECTION_OK)
+		if (PQstatus(multiConnection->pgConn) != CONNECTION_OK)
 		{
 			appendStringInfo(queryResultString, "failed to connect to %s:%d", nodeName,
 							 (int) nodePort);
@@ -257,7 +256,7 @@ ExecuteCommandsInParallelAndStoreResults(StringInfo *nodeNameArray, int *nodePor
 	for (commandIndex = 0; commandIndex < commmandCount; commandIndex++)
 	{
 		int querySent = 0;
-		MultiConnection *connection = connectionArray[commandIndex];
+		PGconn *connection = connectionArray[commandIndex];
 		char *queryString = commandStringArray[commandIndex]->data;
 		StringInfo queryResultString = resultStringArray[commandIndex];
 
@@ -270,17 +269,13 @@ ExecuteCommandsInParallelAndStoreResults(StringInfo *nodeNameArray, int *nodePor
 			continue;
 		}
 
-		/*
-		 * NB: this intentionally uses PQsendQuery rather than
-		 * SendRemoteCommand as multiple commands are allowed.
-		 */
-		querySent = PQsendQuery(connection->pgConn, queryString);
+		querySent = PQsendQuery(connection, queryString);
 
 		if (querySent == 0)
 		{
 			StoreErrorMessage(connection, queryResultString);
 			statusArray[commandIndex] = false;
-			CloseConnection(connection);
+			CloseConnectionByPGconn(connection);
 			connectionArray[commandIndex] = NULL;
 			finishedCount++;
 		}
@@ -291,7 +286,7 @@ ExecuteCommandsInParallelAndStoreResults(StringInfo *nodeNameArray, int *nodePor
 	{
 		for (commandIndex = 0; commandIndex < commmandCount; commandIndex++)
 		{
-			MultiConnection *connection = connectionArray[commandIndex];
+			PGconn *connection = connectionArray[commandIndex];
 			StringInfo queryResultString = resultStringArray[commandIndex];
 			bool success = false;
 			bool queryFinished = false;
@@ -309,7 +304,7 @@ ExecuteCommandsInParallelAndStoreResults(StringInfo *nodeNameArray, int *nodePor
 				finishedCount++;
 				statusArray[commandIndex] = success;
 				connectionArray[commandIndex] = NULL;
-				CloseConnection(connection);
+				CloseConnectionByPGconn(connection);
 			}
 		}
 
@@ -333,11 +328,11 @@ ExecuteCommandsInParallelAndStoreResults(StringInfo *nodeNameArray, int *nodePor
  * reported upon completion of the query.
  */
 static bool
-GetConnectionStatusAndResult(MultiConnection *connection, bool *resultStatus,
+GetConnectionStatusAndResult(PGconn *connection, bool *resultStatus,
 							 StringInfo queryResultString)
 {
 	bool finished = true;
-	ConnStatusType connectionStatus = PQstatus(connection->pgConn);
+	ConnStatusType connectionStatus = PQstatus(connection);
 	int consumeInput = 0;
 	PGresult *queryResult = NULL;
 	bool success = false;
@@ -351,7 +346,7 @@ GetConnectionStatusAndResult(MultiConnection *connection, bool *resultStatus,
 		return finished;
 	}
 
-	consumeInput = PQconsumeInput(connection->pgConn);
+	consumeInput = PQconsumeInput(connection);
 	if (consumeInput == 0)
 	{
 		appendStringInfo(queryResultString, "query result unavailable");
@@ -359,14 +354,14 @@ GetConnectionStatusAndResult(MultiConnection *connection, bool *resultStatus,
 	}
 
 	/* check later if busy */
-	if (PQisBusy(connection->pgConn) != 0)
+	if (PQisBusy(connection) != 0)
 	{
 		finished = false;
 		return finished;
 	}
 
 	/* query result is available at this point */
-	queryResult = PQgetResult(connection->pgConn);
+	queryResult = PQgetResult(connection);
 	success = EvaluateQueryResult(connection, queryResult, queryResultString);
 	PQclear(queryResult);
 
@@ -384,7 +379,7 @@ GetConnectionStatusAndResult(MultiConnection *connection, bool *resultStatus,
  * error otherwise.
  */
 static bool
-EvaluateQueryResult(MultiConnection *connection, PGresult *queryResult,
+EvaluateQueryResult(PGconn *connection, PGresult *queryResult,
 					StringInfo queryResultString)
 {
 	bool success = false;
@@ -439,9 +434,9 @@ EvaluateQueryResult(MultiConnection *connection, PGresult *queryResult,
  * otherwise it would return a default error message.
  */
 static void
-StoreErrorMessage(MultiConnection *connection, StringInfo queryResultString)
+StoreErrorMessage(PGconn *connection, StringInfo queryResultString)
 {
-	char *errorMessage = PQerrorMessage(connection->pgConn);
+	char *errorMessage = PQerrorMessage(connection);
 	if (errorMessage != NULL)
 	{
 		char *firstNewlineIndex = strchr(errorMessage, '\n');
@@ -504,27 +499,26 @@ ExecuteRemoteQueryOrCommand(char *nodeName, uint32 nodePort, char *queryString,
 							StringInfo queryResultString)
 {
 	int connectionFlags = FORCE_NEW_CONNECTION;
-	MultiConnection *connection =
+	MultiConnection *multiConnection =
 		GetNodeConnection(connectionFlags, nodeName, nodePort);
+	PGconn *nodeConnection = multiConnection->pgConn;
 	bool success = false;
 	PGresult *queryResult = NULL;
-	bool raiseInterrupts = true;
 
-	if (PQstatus(connection->pgConn) != CONNECTION_OK)
+	if (PQstatus(multiConnection->pgConn) != CONNECTION_OK)
 	{
 		appendStringInfo(queryResultString, "failed to connect to %s:%d", nodeName,
 						 (int) nodePort);
 		return false;
 	}
 
-	SendRemoteCommand(connection, queryString);
-	queryResult = GetRemoteCommandResult(connection, raiseInterrupts);
-	success = EvaluateQueryResult(connection, queryResult, queryResultString);
+	queryResult = PQexec(nodeConnection, queryString);
+	success = EvaluateQueryResult(nodeConnection, queryResult, queryResultString);
 
 	PQclear(queryResult);
 
 	/* close the connection */
-	CloseConnection(connection);
+	CloseConnection(multiConnection);
 
 	return success;
 }

@@ -1,17 +1,3 @@
-### citus v7.0.0 (unreleased) ###
-
-* Replaces pg_dist_shard_placement metadata table with pg_dist_placement
-
-### citus v6.2.3 (July 13, 2017) ###
-
-* Fixes a crash during execution of local CREATE INDEX CONCURRENTLY
-
-* Fixes a bug preventing usage of quoted column names in COPY
-
-* Fixes a bug in prepared INSERTs with implicit cast in partition column
-
-* Relaxes locks in VACUUM to ensure concurrent execution with INSERT
-
 ### citus v6.2.2 (May 31, 2017) ###
 
 * Fixes a common cause of deadlocks when repairing tables with foreign keys
@@ -79,10 +65,6 @@
 * Addresses various race conditions and deadlocks
 
 * Improves and standardizes error messages
-
-### citus v6.1.2 (May 31, 2017) ###
-
-* Fixes a common cause of deadlocks when repairing tables with foreign keys
 
 ### citus v6.1.1 (May 5, 2017) ###
 

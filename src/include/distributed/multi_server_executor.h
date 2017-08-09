@@ -94,8 +94,7 @@ typedef enum
 	MULTI_EXECUTOR_INVALID_FIRST = 0,
 	MULTI_EXECUTOR_REAL_TIME = 1,
 	MULTI_EXECUTOR_TASK_TRACKER = 2,
-	MULTI_EXECUTOR_ROUTER = 3,
-	MULTI_EXECUTOR_COORDINATOR_INSERT_SELECT = 4
+	MULTI_EXECUTOR_ROUTER = 3
 } MultiExecutorType;
 
 
@@ -116,7 +115,6 @@ typedef enum
  */
 struct TaskExecution
 {
-	CitusNode type;
 	uint64 jobId;
 	uint32 taskId;
 

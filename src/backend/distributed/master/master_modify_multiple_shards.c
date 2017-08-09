@@ -85,17 +85,12 @@ master_modify_multiple_shards(PG_FUNCTION_ARGS)
 	List *prunedShardIntervalList = NIL;
 	List *taskList = NIL;
 	int32 affectedTupleCount = 0;
-#if (PG_VERSION_NUM >= 100000)
-	RawStmt *rawStmt = (RawStmt *) ParseTreeRawStmt(queryString);
-	queryTreeNode = rawStmt->stmt;
-#else
-	queryTreeNode = ParseTreeNode(queryString);
-#endif
 
 	EnsureCoordinator();
 	CheckCitusVersion(ERROR);
 
 
+	queryTreeNode = ParseTreeNode(queryString);
 	if (IsA(queryTreeNode, DeleteStmt))
 	{
 		DeleteStmt *deleteStatement = (DeleteStmt *) queryTreeNode;
@@ -141,18 +136,12 @@ master_modify_multiple_shards(PG_FUNCTION_ARGS)
 
 	CheckDistributedTable(relationId);
 
-#if (PG_VERSION_NUM >= 100000)
-	queryTreeList = pg_analyze_and_rewrite(rawStmt, queryString, NULL, 0, NULL);
-#else
 	queryTreeList = pg_analyze_and_rewrite(queryTreeNode, queryString, NULL, 0);
-#endif
 	modifyQuery = (Query *) linitial(queryTreeList);
 
 	if (modifyQuery->commandType != CMD_UTILITY)
 	{
-		bool multiShardQuery = true;
-		DeferredErrorMessage *error = ModifyQuerySupported(modifyQuery, multiShardQuery);
-
+		DeferredErrorMessage *error = ModifyQuerySupported(modifyQuery);
 		if (error)
 		{
 			RaiseDeferredError(error, ERROR);
@@ -212,7 +201,7 @@ ModifyMultipleShardsTaskList(Query *query, List *shardIntervalList, Oid relation
 		task = CitusMakeNode(Task);
 		task->jobId = jobId;
 		task->taskId = taskId++;
-		task->taskType = MODIFY_TASK;
+		task->taskType = SQL_TASK;
 		task->queryString = shardQueryString->data;
 		task->dependedTaskList = NULL;
 		task->replicationModel = REPLICATION_MODEL_INVALID;

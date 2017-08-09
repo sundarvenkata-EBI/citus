@@ -36,7 +36,6 @@
 #include "distributed/reference_table_utils.h"
 #include "distributed/resource_lock.h"
 #include "distributed/shardinterval_utils.h"
-#include "distributed/transaction_management.h"
 #include "distributed/worker_manager.h"
 #include "lib/stringinfo.h"
 #include "nodes/pg_list.h"
@@ -69,14 +68,10 @@ master_create_worker_shards(PG_FUNCTION_ARGS)
 
 	Oid distributedTableId = ResolveRelationId(tableNameText);
 
-	/* do not add any data */
-	bool useExclusiveConnections = false;
-
 	EnsureCoordinator();
 	CheckCitusVersion(ERROR);
 
-	CreateShardsWithRoundRobinPolicy(distributedTableId, shardCount, replicationFactor,
-									 useExclusiveConnections);
+	CreateShardsWithRoundRobinPolicy(distributedTableId, shardCount, replicationFactor);
 
 	PG_RETURN_VOID();
 }
@@ -84,27 +79,28 @@ master_create_worker_shards(PG_FUNCTION_ARGS)
 
 /*
  * CreateShardsWithRoundRobinPolicy creates empty shards for the given table
- * based on the specified number of initial shards. The function first updates
- * metadata on the coordinator node to make this shard (and its placements)
- * visible. Note that the function assumes the table is hash partitioned and
- * calculates the min/max hash token ranges for each shard, giving them an equal
- * split of the hash space. Finally, function creates empty shard placements on
- * worker nodes.
+ * based on the specified number of initial shards. The function first gets a
+ * list of candidate nodes and issues DDL commands on the nodes to create empty
+ * shard placements on those nodes. The function then updates metadata on the
+ * master node to make this shard (and its placements) visible. Note that the
+ * function assumes the table is hash partitioned and calculates the min/max
+ * hash token ranges for each shard, giving them an equal split of the hash space.
  */
 void
 CreateShardsWithRoundRobinPolicy(Oid distributedTableId, int32 shardCount,
-								 int32 replicationFactor, bool useExclusiveConnections)
+								 int32 replicationFactor)
 {
+	char *relationOwner = NULL;
 	char shardStorageType = 0;
 	List *workerNodeList = NIL;
+	List *ddlCommandList = NIL;
 	int32 workerNodeCount = 0;
 	uint32 placementAttemptCount = 0;
 	uint64 hashTokenIncrement = 0;
 	List *existingShardList = NIL;
 	int64 shardIndex = 0;
+	bool includeSequenceDefaults = false;
 	DistTableCacheEntry *cacheEntry = DistributedTableCacheEntry(distributedTableId);
-	bool colocatedShard = false;
-	List *insertedShardPlacements = NIL;
 
 	/* make sure table is hash partitioned */
 	CheckHashPartitionedTable(distributedTableId);
@@ -117,8 +113,10 @@ CreateShardsWithRoundRobinPolicy(Oid distributedTableId, int32 shardCount,
 	 */
 	EnsureTableOwner(distributedTableId);
 
-	/* we plan to add shards: get an exclusive lock on relation oid */
-	LockRelationOid(distributedTableId, ExclusiveLock);
+	/* we plan to add shards: get an exclusive metadata lock */
+	LockRelationDistributionMetadata(distributedTableId, ExclusiveLock);
+
+	relationOwner = TableOwner(distributedTableId);
 
 	/* validate that shards haven't already been created for this table */
 	existingShardList = LoadShardList(distributedTableId);
@@ -162,15 +160,15 @@ CreateShardsWithRoundRobinPolicy(Oid distributedTableId, int32 shardCount,
 	/* calculate the split of the hash space */
 	hashTokenIncrement = HASH_TOKEN_COUNT / shardCount;
 
-	/* don't allow concurrent node list changes that require an exclusive lock */
-	LockRelationOid(DistNodeRelationId(), RowShareLock);
-
 	/* load and sort the worker node list for deterministic placement */
-	workerNodeList = ActivePrimaryNodeList();
+	workerNodeList = ActiveWorkerNodeList();
 	workerNodeList = SortList(workerNodeList, CompareWorkerNodes);
 
 	/* make sure we don't process cancel signals until all shards are created */
 	HOLD_INTERRUPTS();
+
+	/* retrieve the DDL commands for the table */
+	ddlCommandList = GetTableDDLEvents(distributedTableId, includeSequenceDefaults);
 
 	workerNodeCount = list_length(workerNodeList);
 	if (replicationFactor > workerNodeCount)
@@ -202,7 +200,6 @@ CreateShardsWithRoundRobinPolicy(Oid distributedTableId, int32 shardCount,
 		int32 shardMinHashToken = INT32_MIN + (shardIndex * hashTokenIncrement);
 		int32 shardMaxHashToken = shardMinHashToken + (hashTokenIncrement - 1);
 		uint64 shardId = GetNextShardId();
-		List *currentInsertedShardPlacements = NIL;
 
 		/* if we are at the last shard, make sure the max token value is INT_MAX */
 		if (shardIndex == (shardCount - 1))
@@ -222,20 +219,12 @@ CreateShardsWithRoundRobinPolicy(Oid distributedTableId, int32 shardCount,
 		 */
 		LockShardDistributionMetadata(shardId, ExclusiveLock);
 
+		CreateShardPlacements(distributedTableId, shardId, ddlCommandList, relationOwner,
+							  workerNodeList, roundRobinNodeIndex, replicationFactor);
+
 		InsertShardRow(distributedTableId, shardId, shardStorageType,
 					   minHashTokenText, maxHashTokenText);
-
-		currentInsertedShardPlacements = InsertShardPlacementRows(distributedTableId,
-																  shardId,
-																  workerNodeList,
-																  roundRobinNodeIndex,
-																  replicationFactor);
-		insertedShardPlacements = list_concat(insertedShardPlacements,
-											  currentInsertedShardPlacements);
 	}
-
-	CreateShardsOnWorkers(distributedTableId, insertedShardPlacements,
-						  useExclusiveConnections, colocatedShard);
 
 	if (QueryCancelPending)
 	{
@@ -252,15 +241,16 @@ CreateShardsWithRoundRobinPolicy(Oid distributedTableId, int32 shardCount,
  * the source relation.
  */
 void
-CreateColocatedShards(Oid targetRelationId, Oid sourceRelationId, bool
-					  useExclusiveConnections)
+CreateColocatedShards(Oid targetRelationId, Oid sourceRelationId)
 {
+	char *targetTableRelationOwner = NULL;
 	char targetShardStorageType = 0;
 	List *existingShardList = NIL;
 	List *sourceShardIntervalList = NIL;
+	List *targetTableDDLEvents = NIL;
+	List *targetTableForeignConstraintCommands = NIL;
 	ListCell *sourceShardCell = NULL;
-	bool colocatedShard = true;
-	List *insertedShardPlacements = NIL;
+	bool includeSequenceDefaults = false;
 
 	/* make sure that tables are hash partitioned */
 	CheckHashPartitionedTable(targetRelationId);
@@ -274,8 +264,8 @@ CreateColocatedShards(Oid targetRelationId, Oid sourceRelationId, bool
 	 */
 	EnsureTableOwner(targetRelationId);
 
-	/* we plan to add shards: get an exclusive lock on target relation oid */
-	LockRelationOid(targetRelationId, ExclusiveLock);
+	/* we plan to add shards: get an exclusive metadata lock on the target relation */
+	LockRelationDistributionMetadata(targetRelationId, ExclusiveLock);
 
 	/* we don't want source table to get dropped before we colocate with it */
 	LockRelationOid(sourceRelationId, AccessShareLock);
@@ -294,6 +284,10 @@ CreateColocatedShards(Oid targetRelationId, Oid sourceRelationId, bool
 							   targetRelationName)));
 	}
 
+	targetTableRelationOwner = TableOwner(targetRelationId);
+	targetTableDDLEvents = GetTableDDLEvents(targetRelationId, includeSequenceDefaults);
+	targetTableForeignConstraintCommands = GetTableForeignConstraintCommands(
+		targetRelationId);
 	targetShardStorageType = ShardStorageType(targetRelationId);
 
 	foreach(sourceShardCell, sourceShardIntervalList)
@@ -302,40 +296,47 @@ CreateColocatedShards(Oid targetRelationId, Oid sourceRelationId, bool
 		uint64 sourceShardId = sourceShardInterval->shardId;
 		uint64 newShardId = GetNextShardId();
 		ListCell *sourceShardPlacementCell = NULL;
+		int sourceShardIndex = ShardIndex(sourceShardInterval);
 
 		int32 shardMinValue = DatumGetInt32(sourceShardInterval->minValue);
 		int32 shardMaxValue = DatumGetInt32(sourceShardInterval->maxValue);
 		text *shardMinValueText = IntegerToText(shardMinValue);
 		text *shardMaxValueText = IntegerToText(shardMaxValue);
+
 		List *sourceShardPlacementList = ShardPlacementList(sourceShardId);
-
-		InsertShardRow(targetRelationId, newShardId, targetShardStorageType,
-					   shardMinValueText, shardMaxValueText);
-
 		foreach(sourceShardPlacementCell, sourceShardPlacementList)
 		{
 			ShardPlacement *sourcePlacement =
 				(ShardPlacement *) lfirst(sourceShardPlacementCell);
-			uint32 groupId = sourcePlacement->groupId;
-			const RelayFileState shardState = FILE_FINALIZED;
-			const uint64 shardSize = 0;
-			uint64 shardPlacementId = 0;
-			ShardPlacement *shardPlacement = NULL;
+			char *sourceNodeName = sourcePlacement->nodeName;
+			int32 sourceNodePort = sourcePlacement->nodePort;
 
-			/*
-			 * Optimistically add shard placement row the pg_dist_shard_placement, in case
-			 * of any error it will be roll-backed.
-			 */
-			shardPlacementId = InsertShardPlacementRow(newShardId, INVALID_PLACEMENT_ID,
-													   shardState, shardSize, groupId);
+			bool created = WorkerCreateShard(targetRelationId, sourceNodeName,
+											 sourceNodePort, sourceShardIndex, newShardId,
+											 targetTableRelationOwner,
+											 targetTableDDLEvents,
+											 targetTableForeignConstraintCommands);
+			if (created)
+			{
+				const RelayFileState shardState = FILE_FINALIZED;
+				const uint64 shardSize = 0;
 
-			shardPlacement = LoadShardPlacement(newShardId, shardPlacementId);
-			insertedShardPlacements = lappend(insertedShardPlacements, shardPlacement);
+				InsertShardPlacementRow(newShardId, INVALID_PLACEMENT_ID, shardState,
+										shardSize, sourceNodeName, sourceNodePort);
+			}
+			else
+			{
+				char *targetRelationName = get_rel_name(targetRelationId);
+				char *sourceRelationName = get_rel_name(sourceRelationId);
+				ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+								errmsg("table \"%s\" could not be colocated with %s",
+									   targetRelationName, sourceRelationName)));
+			}
 		}
-	}
 
-	CreateShardsOnWorkers(targetRelationId, insertedShardPlacements,
-						  useExclusiveConnections, colocatedShard);
+		InsertShardRow(targetRelationId, newShardId, targetShardStorageType,
+					   shardMinValueText, shardMaxValueText);
+	}
 }
 
 
@@ -347,8 +348,10 @@ CreateColocatedShards(Oid targetRelationId, Oid sourceRelationId, bool
 void
 CreateReferenceTableShard(Oid distributedTableId)
 {
+	char *relationOwner = NULL;
 	char shardStorageType = 0;
 	List *workerNodeList = NIL;
+	List *ddlCommandList = NIL;
 	int32 workerNodeCount = 0;
 	List *existingShardList = NIL;
 	uint64 shardId = INVALID_SHARD_ID;
@@ -356,9 +359,7 @@ CreateReferenceTableShard(Oid distributedTableId)
 	int replicationFactor = 0;
 	text *shardMinValue = NULL;
 	text *shardMaxValue = NULL;
-	bool useExclusiveConnection = false;
-	bool colocatedShard = false;
-	List *insertedShardPlacements = NIL;
+	bool includeSequenceDefaults = false;
 
 	/*
 	 * In contrast to append/range partitioned tables it makes more sense to
@@ -368,8 +369,10 @@ CreateReferenceTableShard(Oid distributedTableId)
 	 */
 	EnsureTableOwner(distributedTableId);
 
-	/* we plan to add shards: get an exclusive lock on relation oid */
-	LockRelationOid(distributedTableId, ExclusiveLock);
+	/* we plan to add shards: get an exclusive metadata lock */
+	LockRelationDistributionMetadata(distributedTableId, ExclusiveLock);
+
+	relationOwner = TableOwner(distributedTableId);
 
 	/* set shard storage type according to relation type */
 	shardStorageType = ShardStorageType(distributedTableId);
@@ -385,11 +388,14 @@ CreateReferenceTableShard(Oid distributedTableId)
 	}
 
 	/* load and sort the worker node list for deterministic placement */
-	workerNodeList = ActivePrimaryNodeList();
+	workerNodeList = ActiveWorkerNodeList();
 	workerNodeList = SortList(workerNodeList, CompareWorkerNodes);
 
 	/* get the next shard id */
 	shardId = GetNextShardId();
+
+	/* retrieve the DDL commands for the table */
+	ddlCommandList = GetTableDDLEvents(distributedTableId, includeSequenceDefaults);
 
 	/* set the replication factor equal to the number of worker nodes */
 	workerNodeCount = list_length(workerNodeList);
@@ -403,15 +409,11 @@ CreateReferenceTableShard(Oid distributedTableId)
 	 */
 	LockShardDistributionMetadata(shardId, ExclusiveLock);
 
+	CreateShardPlacements(distributedTableId, shardId, ddlCommandList, relationOwner,
+						  workerNodeList, workerStartIndex, replicationFactor);
+
 	InsertShardRow(distributedTableId, shardId, shardStorageType, shardMinValue,
 				   shardMaxValue);
-
-	insertedShardPlacements = InsertShardPlacementRows(distributedTableId, shardId,
-													   workerNodeList, workerStartIndex,
-													   replicationFactor);
-
-	CreateShardsOnWorkers(distributedTableId, insertedShardPlacements,
-						  useExclusiveConnection, colocatedShard);
 }
 
 

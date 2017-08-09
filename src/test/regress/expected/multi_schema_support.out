@@ -586,7 +586,8 @@ ALTER TABLE test_schema_support.nation_hash ADD COLUMN new_col INT;
 NOTICE:  using one-phase commit for distributed DDL commands
 HINT:  You can enable two-phase commit for extra safety with: SET citus.multi_shard_commit_protocol TO '2pc'
 -- verify column is added
-SELECT "Column", "Type", "Modifiers" FROM table_desc WHERE relid='test_schema_support.nation_hash'::regclass;
+\d test_schema_support.nation_hash;
+     Table "test_schema_support.nation_hash"
    Column    |          Type          | Modifiers 
 -------------+------------------------+-----------
  n_nationkey | integer                | not null
@@ -594,10 +595,10 @@ SELECT "Column", "Type", "Modifiers" FROM table_desc WHERE relid='test_schema_su
  n_regionkey | integer                | not null
  n_comment   | character varying(152) | 
  new_col     | integer                | 
-(5 rows)
 
 \c - - - :worker_1_port
-SELECT "Column", "Type", "Modifiers" FROM table_desc WHERE relid='test_schema_support.nation_hash_1190003'::regclass;
+\d test_schema_support.nation_hash_1190003;
+ Table "test_schema_support.nation_hash_1190003"
    Column    |          Type          | Modifiers 
 -------------+------------------------+-----------
  n_nationkey | integer                | not null
@@ -605,7 +606,6 @@ SELECT "Column", "Type", "Modifiers" FROM table_desc WHERE relid='test_schema_su
  n_regionkey | integer                | not null
  n_comment   | character varying(152) | 
  new_col     | integer                | 
-(5 rows)
 
 \c - - - :master_port
 ALTER TABLE test_schema_support.nation_hash DROP COLUMN IF EXISTS non_existent_column;
@@ -614,24 +614,24 @@ NOTICE:  using one-phase commit for distributed DDL commands
 HINT:  You can enable two-phase commit for extra safety with: SET citus.multi_shard_commit_protocol TO '2pc'
 ALTER TABLE test_schema_support.nation_hash DROP COLUMN IF EXISTS new_col;
 -- verify column is dropped
-SELECT "Column", "Type", "Modifiers" FROM table_desc WHERE relid='test_schema_support.nation_hash'::regclass;
+\d test_schema_support.nation_hash;
+     Table "test_schema_support.nation_hash"
    Column    |          Type          | Modifiers 
 -------------+------------------------+-----------
  n_nationkey | integer                | not null
  n_name      | character(25)          | not null
  n_regionkey | integer                | not null
  n_comment   | character varying(152) | 
-(4 rows)
 
 \c - - - :worker_1_port
-SELECT "Column", "Type", "Modifiers" FROM table_desc WHERE relid='test_schema_support.nation_hash_1190003'::regclass;
+\d test_schema_support.nation_hash_1190003;
+ Table "test_schema_support.nation_hash_1190003"
    Column    |          Type          | Modifiers 
 -------------+------------------------+-----------
  n_nationkey | integer                | not null
  n_name      | character(25)          | not null
  n_regionkey | integer                | not null
  n_comment   | character varying(152) | 
-(4 rows)
 
 \c - - - :master_port
 --test with search_path is set
@@ -640,7 +640,8 @@ ALTER TABLE nation_hash ADD COLUMN new_col INT;
 NOTICE:  using one-phase commit for distributed DDL commands
 HINT:  You can enable two-phase commit for extra safety with: SET citus.multi_shard_commit_protocol TO '2pc'
 -- verify column is added
-SELECT "Column", "Type", "Modifiers" FROM public.table_desc WHERE relid='test_schema_support.nation_hash'::regclass;
+\d test_schema_support.nation_hash;
+     Table "test_schema_support.nation_hash"
    Column    |          Type          | Modifiers 
 -------------+------------------------+-----------
  n_nationkey | integer                | not null
@@ -648,10 +649,10 @@ SELECT "Column", "Type", "Modifiers" FROM public.table_desc WHERE relid='test_sc
  n_regionkey | integer                | not null
  n_comment   | character varying(152) | 
  new_col     | integer                | 
-(5 rows)
 
 \c - - - :worker_1_port
-SELECT "Column", "Type", "Modifiers" FROM public.table_desc WHERE relid='test_schema_support.nation_hash_1190003'::regclass;
+\d test_schema_support.nation_hash_1190003;
+ Table "test_schema_support.nation_hash_1190003"
    Column    |          Type          | Modifiers 
 -------------+------------------------+-----------
  n_nationkey | integer                | not null
@@ -659,7 +660,6 @@ SELECT "Column", "Type", "Modifiers" FROM public.table_desc WHERE relid='test_sc
  n_regionkey | integer                | not null
  n_comment   | character varying(152) | 
  new_col     | integer                | 
-(5 rows)
 
 \c - - - :master_port
 SET search_path TO test_schema_support;
@@ -669,24 +669,24 @@ NOTICE:  using one-phase commit for distributed DDL commands
 HINT:  You can enable two-phase commit for extra safety with: SET citus.multi_shard_commit_protocol TO '2pc'
 ALTER TABLE nation_hash DROP COLUMN IF EXISTS new_col;
 -- verify column is dropped
-SELECT "Column", "Type", "Modifiers" FROM public.table_desc WHERE relid='test_schema_support.nation_hash'::regclass;
+\d test_schema_support.nation_hash;
+     Table "test_schema_support.nation_hash"
    Column    |          Type          | Modifiers 
 -------------+------------------------+-----------
  n_nationkey | integer                | not null
  n_name      | character(25)          | not null
  n_regionkey | integer                | not null
  n_comment   | character varying(152) | 
-(4 rows)
 
 \c - - - :worker_1_port
-SELECT "Column", "Type", "Modifiers" FROM public.table_desc WHERE relid='test_schema_support.nation_hash_1190003'::regclass;
+\d test_schema_support.nation_hash_1190003;
+ Table "test_schema_support.nation_hash_1190003"
    Column    |          Type          | Modifiers 
 -------------+------------------------+-----------
  n_nationkey | integer                | not null
  n_name      | character(25)          | not null
  n_regionkey | integer                | not null
  n_comment   | character varying(152) | 
-(4 rows)
 
 \c - - - :master_port
 -- test CREATE/DROP INDEX with schemas
@@ -696,20 +696,28 @@ CREATE INDEX index1 ON test_schema_support.nation_hash(n_name);
 NOTICE:  using one-phase commit for distributed DDL commands
 HINT:  You can enable two-phase commit for extra safety with: SET citus.multi_shard_commit_protocol TO '2pc'
 --verify INDEX is created
-\d test_schema_support.index1
- Index "test_schema_support.index1"
- Column |     Type      | Definition 
---------+---------------+------------
- n_name | character(25) | n_name
-btree, for table "test_schema_support.nation_hash"
+\d test_schema_support.nation_hash;
+     Table "test_schema_support.nation_hash"
+   Column    |          Type          | Modifiers 
+-------------+------------------------+-----------
+ n_nationkey | integer                | not null
+ n_name      | character(25)          | not null
+ n_regionkey | integer                | not null
+ n_comment   | character varying(152) | 
+Indexes:
+    "index1" btree (n_name)
 
 \c - - - :worker_1_port
-\d test_schema_support.index1_1190003
-Index "test_schema_support.index1_1190003"
- Column |     Type      | Definition 
---------+---------------+------------
- n_name | character(25) | n_name
-btree, for table "test_schema_support.nation_hash_1190003"
+\d test_schema_support.nation_hash_1190003;
+ Table "test_schema_support.nation_hash_1190003"
+   Column    |          Type          | Modifiers 
+-------------+------------------------+-----------
+ n_nationkey | integer                | not null
+ n_name      | character(25)          | not null
+ n_regionkey | integer                | not null
+ n_comment   | character varying(152) | 
+Indexes:
+    "index1_1190003" btree (n_name)
 
 \c - - - :master_port
 -- DROP index
@@ -717,9 +725,25 @@ DROP INDEX test_schema_support.index1;
 NOTICE:  using one-phase commit for distributed DDL commands
 HINT:  You can enable two-phase commit for extra safety with: SET citus.multi_shard_commit_protocol TO '2pc'
 --verify INDEX is dropped
-\d test_schema_support.index1
+\d test_schema_support.nation_hash;
+     Table "test_schema_support.nation_hash"
+   Column    |          Type          | Modifiers 
+-------------+------------------------+-----------
+ n_nationkey | integer                | not null
+ n_name      | character(25)          | not null
+ n_regionkey | integer                | not null
+ n_comment   | character varying(152) | 
+
 \c - - - :worker_1_port
-\d test_schema_support.index1_1190003
+\d test_schema_support.nation_hash_1190003;
+ Table "test_schema_support.nation_hash_1190003"
+   Column    |          Type          | Modifiers 
+-------------+------------------------+-----------
+ n_nationkey | integer                | not null
+ n_name      | character(25)          | not null
+ n_regionkey | integer                | not null
+ n_comment   | character varying(152) | 
+
 \c - - - :master_port
 --test with search_path is set
 SET search_path TO test_schema_support;
@@ -728,20 +752,28 @@ CREATE INDEX index1 ON nation_hash(n_name);
 NOTICE:  using one-phase commit for distributed DDL commands
 HINT:  You can enable two-phase commit for extra safety with: SET citus.multi_shard_commit_protocol TO '2pc'
 --verify INDEX is created
-\d test_schema_support.index1
- Index "test_schema_support.index1"
- Column |     Type      | Definition 
---------+---------------+------------
- n_name | character(25) | n_name
-btree, for table "test_schema_support.nation_hash"
+\d test_schema_support.nation_hash;
+     Table "test_schema_support.nation_hash"
+   Column    |          Type          | Modifiers 
+-------------+------------------------+-----------
+ n_nationkey | integer                | not null
+ n_name      | character(25)          | not null
+ n_regionkey | integer                | not null
+ n_comment   | character varying(152) | 
+Indexes:
+    "index1" btree (n_name)
 
 \c - - - :worker_1_port
-\d test_schema_support.index1_1190003
-Index "test_schema_support.index1_1190003"
- Column |     Type      | Definition 
---------+---------------+------------
- n_name | character(25) | n_name
-btree, for table "test_schema_support.nation_hash_1190003"
+\d test_schema_support.nation_hash_1190003;
+ Table "test_schema_support.nation_hash_1190003"
+   Column    |          Type          | Modifiers 
+-------------+------------------------+-----------
+ n_nationkey | integer                | not null
+ n_name      | character(25)          | not null
+ n_regionkey | integer                | not null
+ n_comment   | character varying(152) | 
+Indexes:
+    "index1_1190003" btree (n_name)
 
 \c - - - :master_port
 -- DROP index
@@ -750,9 +782,25 @@ DROP INDEX index1;
 NOTICE:  using one-phase commit for distributed DDL commands
 HINT:  You can enable two-phase commit for extra safety with: SET citus.multi_shard_commit_protocol TO '2pc'
 --verify INDEX is dropped
-\d test_schema_support.index1
+\d test_schema_support.nation_hash;
+     Table "test_schema_support.nation_hash"
+   Column    |          Type          | Modifiers 
+-------------+------------------------+-----------
+ n_nationkey | integer                | not null
+ n_name      | character(25)          | not null
+ n_regionkey | integer                | not null
+ n_comment   | character varying(152) | 
+
 \c - - - :worker_1_port
-\d test_schema_support.index1_1190003
+\d test_schema_support.nation_hash_1190003;
+ Table "test_schema_support.nation_hash_1190003"
+   Column    |          Type          | Modifiers 
+-------------+------------------------+-----------
+ n_nationkey | integer                | not null
+ n_name      | character(25)          | not null
+ n_regionkey | integer                | not null
+ n_comment   | character varying(152) | 
+
 \c - - - :master_port
 -- test master_copy_shard_placement with schemas
 SET search_path TO public;
@@ -1095,32 +1143,3 @@ SELECT run_command_on_coordinator_and_workers('DROP USER "test-user"');
 (1 row)
 
 DROP FUNCTION run_command_on_coordinator_and_workers(p_sql text);
--- test run_command_on_* UDFs with schema
-CREATE SCHEMA run_test_schema;
-CREATE TABLE run_test_schema.test_table(id int);
-SELECT create_distributed_table('run_test_schema.test_table','id');
- create_distributed_table 
---------------------------
- 
-(1 row)
-
--- randomly insert data to evaluate below UDFs better
-INSERT INTO run_test_schema.test_table VALUES(1);
-INSERT INTO run_test_schema.test_table VALUES(7);
-INSERT INTO run_test_schema.test_table VALUES(9);
--- try UDFs which call shard_name as a subroutine
-SELECT sum(result::int) FROM run_command_on_placements('run_test_schema.test_table','SELECT pg_table_size(''%s'')');
-  sum  
--------
- 49152
-(1 row)
-
-SELECT sum(result::int) FROM run_command_on_shards('run_test_schema.test_table','SELECT pg_table_size(''%s'')');
-  sum  
--------
- 24576
-(1 row)
-
--- Clean up the created schema
-DROP SCHEMA run_test_schema CASCADE;
-NOTICE:  drop cascades to table run_test_schema.test_table

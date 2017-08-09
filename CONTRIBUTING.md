@@ -47,7 +47,7 @@ why we ask this as well as instructions for how to proceed, see the
        sudo apt-key add -
   sudo apt-get update
 
-  sudo apt-get install -y postgresql-server-dev-9.6 postgresql-9.6 \
+  sudo apt-get install -y postgresql-server-dev-9.5 postgresql-9.5 \
                           libedit-dev libselinux1-dev libxslt-dev  \
                           libpam0g-dev git flex make
   ```
@@ -66,7 +66,7 @@ why we ask this as well as instructions for how to proceed, see the
 
 #### Red Hat-based Linux (RHEL, CentOS, Fedora)
 
-1. Find the PostgreSQL 9.6 RPM URL for your repo at [yum.postgresql.org](http://yum.postgresql.org/repopackages.php#pg96)
+1. Find the PostgreSQL 9.5 RPM URL for your repo at [yum.postgresql.org](http://yum.postgresql.org/repopackages.php#pg95)
 2. Register its contents with Yum:
 
   ```bash
@@ -78,44 +78,15 @@ why we ask this as well as instructions for how to proceed, see the
   ```bash
   sudo yum update -y
   sudo yum groupinstall -y 'Development Tools'
-  sudo yum install -y postgresql96-devel postgresql96-server    \
+  sudo yum install -y postgresql95-devel postgresql95-server    \
                       libxml2-devel libxslt-devel openssl-devel \
                       pam-devel readline-devel git
 
   git clone https://github.com/citusdata/citus.git
   cd citus
-  PG_CONFIG=/usr/pgsql-9.6/bin/pg_config ./configure
+  PG_CONFIG=/usr/pgsql-9.5/bin/pg_config ./configure
   make
   sudo make install
   cd src/test/regress
   make check
   ```
-
-### Following our coding conventions
-
-Travis will automatically reject any PRs which do not follow our coding conventions, it
-won't even run tests! The easiest way to ensure your PR adheres to those conventions is
-to use the [citus_indent](https://github.com/citusdata/tools/tree/develop/uncrustify)
-tool.
-
-  ```bash
-  # Ubuntu does have uncrustify in the package manager however it's an older
-  # version which doesn't work with our citus-style.cfg file. We require version
-  # 0.60 or greater. If your package manager has a more recent version of uncrustify
-  # feel free to use that instead of installing from source
-  git clone --branch uncrustify-0.60 https://github.com/uncrustify/uncrustify.git
-  pushd uncrustify
-  ./configure
-  sudo make install
-  popd
-
-  git clone https://github.com/citusdata/tools.git
-  pushd tools/uncrustify
-  make install
-  popd
-  ```
-
-Once you've done that, you can run the `citus_indent` command to recursively check and
-correct the style of any source files in the current directory. You can also run `make
-reindent` from within the Citus repo to correct the style of all source files in the
-repository.

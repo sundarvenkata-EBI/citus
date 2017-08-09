@@ -33,7 +33,9 @@
 #include "catalog/namespace.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_constraint.h"
+#if (PG_VERSION_NUM >= 90600)
 #include "catalog/pg_constraint_fn.h"
+#endif
 #include "catalog/pg_index.h"
 #include "catalog/pg_type.h"
 #include "catalog/pg_namespace.h"
@@ -58,9 +60,6 @@
 #include "utils/relcache.h"
 #include "utils/ruleutils.h"
 #include "utils/tqual.h"
-#if (PG_VERSION_NUM >= 100000)
-#include "utils/varlena.h"
-#endif
 
 
 /* Shard related configuration */
@@ -399,7 +398,7 @@ master_get_active_worker_nodes(PG_FUNCTION_ARGS)
 		/* switch to memory context appropriate for multiple function calls */
 		oldContext = MemoryContextSwitchTo(functionContext->multi_call_memory_ctx);
 
-		workerNodeList = ActivePrimaryNodeList();
+		workerNodeList = ActiveWorkerNodeList();
 		workerNodeCount = (uint32) list_length(workerNodeList);
 
 		functionContext->user_fctx = workerNodeList;
@@ -496,6 +495,8 @@ GetTableCreationCommands(Oid relationId, bool includeSequenceDefaults)
 {
 	List *tableDDLEventList = NIL;
 	char tableType = 0;
+	List *sequenceIdlist = getOwnedSequences(relationId);
+	ListCell *sequenceIdCell;
 	char *tableSchemaDef = NULL;
 	char *tableColumnOptionsDef = NULL;
 	char *createSchemaCommand = NULL;
@@ -531,6 +532,15 @@ GetTableCreationCommands(Oid relationId, bool includeSequenceDefaults)
 	if (createSchemaCommand != NULL)
 	{
 		tableDDLEventList = lappend(tableDDLEventList, createSchemaCommand);
+	}
+
+	/* create sequences if needed */
+	foreach(sequenceIdCell, sequenceIdlist)
+	{
+		Oid sequenceRelid = lfirst_oid(sequenceIdCell);
+		char *sequenceDef = pg_get_sequencedef_string(sequenceRelid);
+
+		tableDDLEventList = lappend(tableDDLEventList, sequenceDef);
 	}
 
 	/* fetch table schema and column option definitions */
@@ -721,7 +731,7 @@ ShardStorageType(Oid relationId)
 	char shardStorageType = 0;
 
 	char relationType = get_rel_relkind(relationId);
-	if (RegularTable(relationId))
+	if (relationType == RELKIND_RELATION)
 	{
 		shardStorageType = SHARD_STORAGE_TABLE;
 	}

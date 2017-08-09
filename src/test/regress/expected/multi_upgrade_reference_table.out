@@ -794,12 +794,11 @@ ORDER BY
 
 -- verify that shard is replicated to other worker
 \c - - - :worker_2_port
-\dt upgrade_reference_table_transaction_commit_*
-                               List of relations
- Schema |                        Name                        | Type  |  Owner   
---------+----------------------------------------------------+-------+----------
- public | upgrade_reference_table_transaction_commit_1360014 | table | postgres
-(1 row)
+\d upgrade_reference_table_transaction_commit_*
+Table "public.upgrade_reference_table_transaction_commit_1360014"
+ Column  |  Type   | Modifiers 
+---------+---------+-----------
+ column1 | integer | 
 
 \c - - - :master_port
 DROP TABLE upgrade_reference_table_transaction_commit;

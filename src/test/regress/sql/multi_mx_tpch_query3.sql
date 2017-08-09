@@ -7,6 +7,8 @@
 -- coming from postgresql.conf or multi_task_tracker_executor.conf.
 
 
+ALTER SEQUENCE pg_catalog.pg_dist_shardid_seq RESTART 1260000;
+
 -- connect to the coordinator
 \c - - - :master_port
 
@@ -36,6 +38,8 @@ ORDER BY
 -- connect one of the workers
 \c - - - :worker_1_port
 
+ALTER SEQUENCE pg_catalog.pg_dist_shardid_seq RESTART 1260000;
+
 SELECT
 	l_orderkey,
 	sum(l_extendedprice * (1 - l_discount)) as revenue,
@@ -61,6 +65,8 @@ ORDER BY
 
 -- connect to the other node
 \c - - - :worker_2_port
+
+ALTER SEQUENCE pg_catalog.pg_dist_shardid_seq RESTART 1260000;
 
 SELECT
 	l_orderkey,

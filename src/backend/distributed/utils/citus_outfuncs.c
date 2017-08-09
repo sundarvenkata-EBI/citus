@@ -26,7 +26,6 @@
 #include "distributed/multi_logical_planner.h"
 #include "distributed/multi_physical_planner.h"
 #include "distributed/multi_planner.h"
-#include "distributed/multi_server_executor.h"
 #include "distributed/master_metadata_utility.h"
 #include "lib/stringinfo.h"
 #include "nodes/plannodes.h"
@@ -46,17 +45,19 @@
 		const nodeTypeName *node = (const nodeTypeName *) raw_node
 
 /* Write the label for the node type */
+#if (PG_VERSION_NUM >= 90600)
 #define WRITE_NODE_TYPE(nodelabel) \
 	(void) 0
+
+#else
+#define WRITE_NODE_TYPE(nodelabel) \
+	appendStringInfoString(str, nodelabel)
+
+#endif
 
 /* Write an integer field (anything written as ":fldname %d") */
 #define WRITE_INT_FIELD(fldname) \
 	appendStringInfo(str, " :" CppAsString(fldname) " %d", node->fldname)
-
-/* Write an 64-bit integer field (anything written as ":fldname %d") */
-#define WRITE_INT64_FIELD(fldname) \
-	appendStringInfo(str, " :" CppAsString(fldname) " " INT64_FORMAT, node->fldname)
-
 
 /* Write an unsigned integer field (anything written as ":fldname %u") */
 #define WRITE_UINT_FIELD(fldname) \
@@ -112,29 +113,125 @@
 	 _outBitmapset(str, node->fldname))
 
 
-/* Write an integer array (anything written as ":fldname (%d, %d") */
-#define WRITE_INT_ARRAY(fldname, count) \
-	appendStringInfo(str, " :" CppAsString(fldname) " ("); \
-	{ \
-		int i;\
-		for (i = 0; i < count; i++) \
-		{ \
-			if (i > 0) \
-			{ \
-				appendStringInfo(str, ", "); \
-			} \
-			appendStringInfo(str, "%d", node->fldname[i]); \
-		}\
-	}\
-	appendStringInfo(str, ")")
-
-
-/* Write an enum array (anything written as ":fldname (%d, %d") */
-#define WRITE_ENUM_ARRAY(fldname, count) WRITE_INT_ARRAY(fldname, count)
-
-
 #define booltostr(x)  ((x) ? "true" : "false")
 
+#if (PG_VERSION_NUM < 90600)
+static void outNode(StringInfo str, const void *obj);
+
+/*
+ * outToken
+ *	  Convert an ordinary string (eg, an identifier) into a form that
+ *	  will be decoded back to a plain token by read.c's functions.
+ *
+ *	  If a null or empty string is given, it is encoded as "<>".
+ */
+static void
+outToken(StringInfo str, const char *s)
+{
+	if (s == NULL || *s == '\0')
+	{
+		appendStringInfoString(str, "<>");
+		return;
+	}
+
+	/*
+	 * Look for characters or patterns that are treated specially by read.c
+	 * (either in pg_strtok() or in nodeRead()), and therefore need a
+	 * protective backslash.
+	 */
+	/* These characters only need to be quoted at the start of the string */
+	if (*s == '<' ||
+		*s == '\"' ||
+		isdigit((unsigned char) *s) ||
+		((*s == '+' || *s == '-') &&
+		 (isdigit((unsigned char) s[1]) || s[1] == '.')))
+		appendStringInfoChar(str, '\\');
+	while (*s)
+	{
+		/* These chars must be backslashed anywhere in the string */
+		if (*s == ' ' || *s == '\n' || *s == '\t' ||
+			*s == '(' || *s == ')' || *s == '{' || *s == '}' ||
+			*s == '\\')
+			appendStringInfoChar(str, '\\');
+		appendStringInfoChar(str, *s++);
+	}
+}
+
+
+static void
+_outList(StringInfo str, const List *node)
+{
+	const ListCell *lc;
+
+	appendStringInfoChar(str, '(');
+
+	if (IsA(node, IntList))
+		appendStringInfoChar(str, 'i');
+	else if (IsA(node, OidList))
+		appendStringInfoChar(str, 'o');
+
+	foreach(lc, node)
+	{
+		/*
+		 * For the sake of backward compatibility, we emit a slightly
+		 * different whitespace format for lists of nodes vs. other types of
+		 * lists. XXX: is this necessary?
+		 */
+		if (IsA(node, List))
+		{
+			outNode(str, lfirst(lc));
+			if (lnext(lc))
+				appendStringInfoChar(str, ' ');
+		}
+		else if (IsA(node, IntList))
+			appendStringInfo(str, " %d", lfirst_int(lc));
+		else if (IsA(node, OidList))
+			appendStringInfo(str, " %u", lfirst_oid(lc));
+		else
+			elog(ERROR, "unrecognized list node type: %d",
+				 (int) node->type);
+	}
+
+	appendStringInfoChar(str, ')');
+}
+
+
+/*
+ * Print the value of a Datum given its type.
+ */
+static void
+outDatum(StringInfo str, Datum value, int typlen, bool typbyval)
+{
+	Size		length,
+				i;
+	char	   *s;
+
+	length = datumGetSize(value, typbyval, typlen);
+
+	if (typbyval)
+	{
+		s = (char *) (&value);
+		appendStringInfo(str, "%u [ ", (unsigned int) length);
+		for (i = 0; i < (Size) sizeof(Datum); i++)
+			appendStringInfo(str, "%d ", (int) (s[i]));
+		appendStringInfoChar(str, ']');
+	}
+	else
+	{
+		s = (char *) DatumGetPointer(value);
+		if (!PointerIsValid(s))
+			appendStringInfoString(str, "0 [ ]");
+		else
+		{
+			appendStringInfo(str, "%u [ ", (unsigned int) length);
+			for (i = 0; i < length; i++)
+				appendStringInfo(str, "%d ", (int) (s[i]));
+			appendStringInfoChar(str, ']');
+		}
+	}
+}
+
+#endif
 
 /*****************************************************************************
  *	Output routines for Citus node types
@@ -185,11 +282,6 @@ OutMultiPlan(OUTFUNC_ARGS)
 	WRITE_NODE_FIELD(workerJob);
 	WRITE_NODE_FIELD(masterQuery);
 	WRITE_BOOL_FIELD(routerExecutable);
-
-	WRITE_NODE_FIELD(insertSelectSubquery);
-	WRITE_NODE_FIELD(insertTargetList);
-	WRITE_OID_FIELD(targetRelationId);
-
 	WRITE_NODE_FIELD(planningError);
 }
 
@@ -384,27 +476,12 @@ OutShardPlacement(OUTFUNC_ARGS)
 	WRITE_UINT64_FIELD(shardId);
 	WRITE_UINT64_FIELD(shardLength);
 	WRITE_ENUM_FIELD(shardState, RelayFileState);
-	WRITE_UINT_FIELD(groupId);
 	WRITE_STRING_FIELD(nodeName);
 	WRITE_UINT_FIELD(nodePort);
 	/* so we can deal with 0 */
 	WRITE_INT_FIELD(partitionMethod);
 	WRITE_UINT_FIELD(colocationGroupId);
 	WRITE_UINT_FIELD(representativeValue);
-}
-
-
-void
-OutGroupShardPlacement(OUTFUNC_ARGS)
-{
-	WRITE_LOCALS(GroupShardPlacement);
-	WRITE_NODE_TYPE("GROUPSHARDPLACEMENT");
-
-	WRITE_UINT64_FIELD(placementId);
-	WRITE_UINT64_FIELD(shardId);
-	WRITE_UINT64_FIELD(shardLength);
-	WRITE_ENUM_FIELD(shardState, RelayFileState);
-	WRITE_UINT_FIELD(groupId);
 }
 
 
@@ -445,29 +522,6 @@ OutTask(OUTFUNC_ARGS)
 
 
 void
-OutTaskExecution(OUTFUNC_ARGS)
-{
-	WRITE_LOCALS(TaskExecution);
-	WRITE_NODE_TYPE("TASKEXECUTION");
-
-	WRITE_UINT64_FIELD(jobId);
-	WRITE_UINT_FIELD(taskId);
-	WRITE_UINT_FIELD(nodeCount);
-
-	WRITE_ENUM_ARRAY(taskStatusArray, node->nodeCount);
-	WRITE_ENUM_ARRAY(transmitStatusArray, node->nodeCount);
-	WRITE_INT_ARRAY(connectionIdArray, node->nodeCount);
-	WRITE_INT_ARRAY(fileDescriptorArray, node->nodeCount);
-
-	WRITE_INT64_FIELD(connectStartTime);
-	WRITE_UINT_FIELD(currentNodeIndex);
-	WRITE_UINT_FIELD(querySourceNodeIndex);
-	WRITE_INT_FIELD(dataFetchTaskIndex);
-	WRITE_UINT_FIELD(failureCount);
-}
-
-
-void
 OutDeferredErrorMessage(OUTFUNC_ARGS)
 {
 	WRITE_LOCALS(DeferredErrorMessage);
@@ -480,4 +534,157 @@ OutDeferredErrorMessage(OUTFUNC_ARGS)
 	WRITE_STRING_FIELD(filename);
 	WRITE_INT_FIELD(linenumber);
 	WRITE_STRING_FIELD(functionname);
+}
+
+
+#if (PG_VERSION_NUM < 90600)
+
+/*
+ * outNode -
+ *	  converts a Node into ascii string and append it to 'str'
+ */
+static void
+outNode(StringInfo str, const void *obj)
+{
+	if (obj == NULL)
+	{
+		appendStringInfoString(str, "<>");
+		return;
+	}
+
+
+	switch (CitusNodeTag(obj))
+	{
+		case T_List:
+		case T_IntList:
+		case T_OidList:
+			_outList(str, obj);
+			break;
+
+		case T_MultiTreeRoot:
+			appendStringInfoChar(str, '{');
+			OutMultiTreeRoot(str, obj);
+			appendStringInfoChar(str, '}');
+			break;
+
+		case T_MultiProject:
+			appendStringInfoChar(str, '{');
+			OutMultiProject(str, obj);
+			appendStringInfoChar(str, '}');
+			break;
+
+		case T_MultiCollect:
+			appendStringInfoChar(str, '{');
+			OutMultiCollect(str, obj);
+			appendStringInfoChar(str, '}');
+			break;
+
+		case T_MultiSelect:
+			appendStringInfoChar(str, '{');
+			OutMultiSelect(str, obj);
+			appendStringInfoChar(str, '}');
+			break;
+
+		case T_MultiTable:
+			appendStringInfoChar(str, '{');
+			OutMultiTable(str, obj);
+			appendStringInfoChar(str, '}');
+			break;
+
+		case T_MultiJoin:
+			appendStringInfoChar(str, '{');
+			OutMultiJoin(str, obj);
+			appendStringInfoChar(str, '}');
+			break;
+
+		case T_MultiPartition:
+			appendStringInfoChar(str, '{');
+			OutMultiPartition(str, obj);
+			appendStringInfoChar(str, '}');
+			break;
+
+		case T_MultiCartesianProduct:
+			appendStringInfoChar(str, '{');
+			OutMultiCartesianProduct(str, obj);
+			appendStringInfoChar(str, '}');
+			break;
+
+		case T_MultiExtendedOp:
+			appendStringInfoChar(str, '{');
+			OutMultiExtendedOp(str, obj);
+			appendStringInfoChar(str, '}');
+			break;
+
+		case T_Job:
+			appendStringInfoChar(str, '{');
+			OutJob(str, obj);
+			appendStringInfoChar(str, '}');
+			break;
+
+		case T_MapMergeJob:
+			appendStringInfoChar(str, '{');
+			OutMapMergeJob(str, obj);
+			appendStringInfoChar(str, '}');
+			break;
+
+		case T_MultiPlan:
+			appendStringInfoChar(str, '{');
+			OutMultiPlan(str, obj);
+			appendStringInfoChar(str, '}');
+			break;
+
+		case T_Task:
+			appendStringInfoChar(str, '{');
+			OutTask(str, obj);
+			appendStringInfoChar(str, '}');
+			break;
+
+		case T_ShardInterval:
+			appendStringInfoChar(str, '{');
+			OutShardInterval(str, obj);
+			appendStringInfoChar(str, '}');
+			break;
+
+		case T_ShardPlacement:
+			appendStringInfoChar(str, '{');
+			OutShardPlacement(str, obj);
+			appendStringInfoChar(str, '}');
+			break;
+
+		case T_RelationShard:
+			appendStringInfoChar(str, '{');
+			OutRelationShard(str, obj);
+			appendStringInfoChar(str, '}');
+			break;
+
+		case T_DeferredErrorMessage:
+			appendStringInfoChar(str, '{');
+			OutDeferredErrorMessage(str, obj);
+			appendStringInfoChar(str, '}');
+			break;
+
+		default:
+			/* fall back into postgres' normal nodeToString machinery */
+			appendStringInfoString(str, nodeToString(obj));
+	}
+}
+
+#endif
+
+/*
+ * CitusNodeToString -
+ *	   returns the ascii representation of the Node as a palloc'd string
+ */
+char *
+CitusNodeToString(const void *obj)
+{
+#if (PG_VERSION_NUM >= 90600)
+	return nodeToString(obj);
+#else
+	StringInfoData str;
+
+	initStringInfo(&str);
+	outNode(&str, obj);
+	return str.data;
+#endif
 }
